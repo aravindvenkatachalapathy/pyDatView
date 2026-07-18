@@ -6,4 +6,5 @@ pyarrow # for parquet files
 matplotlib 
 chardet
 scipy
-wxpython
+PySide6
+pyqtgraph

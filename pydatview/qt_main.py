@@ -1,0 +1,1048 @@
+"""PySide6/PyQtGraph pyDatView application.
+
+This is the migrated primary GUI path. It reuses pyDatView's existing IO,
+TableList, and PlotData data model, while replacing the wx/matplotlib UI and
+plotting surface with Qt widgets and PyQtGraph.
+"""
+
+import os
+import re
+import sys
+import time
+import traceback
+
+import numpy as np
+
+from pydatview.Tables import TableList
+from pydatview.plotdata import PlotData, PDL_xlabel
+import pydatview.io as weio
+
+
+def _require_qt():
+    try:
+        from PySide6 import QtCore, QtGui, QtWidgets
+        import pyqtgraph as pg
+    except ImportError as exc:
+        raise SystemExit(
+            "pyDatView Qt requires PySide6 and pyqtgraph.\n"
+            "Install them with: pip install PySide6 pyqtgraph"
+        ) from exc
+    return QtCore, QtGui, QtWidgets, pg
+
+
+QtCore, QtGui, QtWidgets, pg = _require_qt()
+
+
+def _resource_path(*parts):
+    return os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "ressources", *parts))
+
+
+def _format_specs(file_format):
+    specs = []
+    for ext in getattr(file_format, "extensions", []):
+        ext = str(ext).strip()
+        if not ext:
+            continue
+        if not ext.startswith("."):
+            ext = "." + ext
+        ext_l = ext.lower()
+        if "*" in ext_l:
+            specs.append(("prefix", ext_l.split("*", 1)[0]))
+        elif "X" in ext:
+            pat = "^" + "".join("[0-9]" if c == "X" else re.escape(c.lower()) for c in ext) + "$"
+            specs.append(("regex", re.compile(pat, re.IGNORECASE)))
+        else:
+            specs.append(("suffix", ext_l))
+    return specs
+
+
+def _matches_specs(filename, specs):
+    ext = os.path.splitext(filename)[1].lower()
+    if not ext:
+        return False
+    for kind, value in specs:
+        if kind == "suffix" and ext == value:
+            return True
+        if kind == "prefix" and ext.startswith(value):
+            return True
+        if kind == "regex" and value.match(ext):
+            return True
+    return False
+
+
+def _parse_bladed_suffixes(text):
+    suffixes = []
+    for value in re.split(r"[,;\s]+", text.strip().lower()):
+        value = value.strip().lstrip(".").lstrip("$").lstrip("%")
+        if value:
+            suffixes.append(value)
+    return suffixes
+
+
+def _matches_bladed_suffix(filename, suffixes):
+    ext = os.path.splitext(filename)[1].lower()
+    if not ext:
+        return False
+    suffix = ext.lstrip(".").lstrip("$").lstrip("%")
+    return suffix in suffixes
+
+
+def scan_readable_files(folder, format_specs, recursive=True):
+    matches = []
+    if not folder or not os.path.isdir(folder):
+        return matches
+    stack = [folder]
+    while stack:
+        current = stack.pop()
+        try:
+            with os.scandir(current) as entries:
+                for entry in entries:
+                    try:
+                        if entry.is_dir(follow_symlinks=False):
+                            if recursive:
+                                stack.append(entry.path)
+                        elif entry.is_file(follow_symlinks=False) and _matches_specs(entry.name, format_specs):
+                            matches.append(entry.path)
+                    except OSError:
+                        continue
+        except OSError:
+            continue
+    return sorted(matches)
+
+
+def scan_readable_file_matches(folder, format_entries, recursive=True, bladed_suffixes=None):
+    matches = []
+    if not folder or not os.path.isdir(folder):
+        return matches
+    entries = [(fmt, specs) for fmt, specs in format_entries if specs]
+    bladed_suffixes = set(bladed_suffixes or [])
+    stack = [folder]
+    while stack:
+        current = stack.pop()
+        try:
+            with os.scandir(current) as dir_entries:
+                for entry in dir_entries:
+                    try:
+                        if entry.is_dir(follow_symlinks=False):
+                            if recursive:
+                                stack.append(entry.path)
+                            continue
+                        if not entry.is_file(follow_symlinks=False):
+                            continue
+                        for fmt, specs in entries:
+                            if getattr(fmt, "name", "") == "Bladed output file" and bladed_suffixes:
+                                matched = _matches_bladed_suffix(entry.name, bladed_suffixes)
+                            else:
+                                matched = _matches_specs(entry.name, specs)
+                            if matched:
+                                matches.append((entry.path, fmt))
+                                break
+                    except OSError:
+                        continue
+        except OSError:
+            continue
+    return sorted(matches, key=lambda item: item[0])
+
+
+def _as_float_array(values):
+    arr = np.asarray(values)
+    if arr.dtype.kind == "M":
+        return arr.astype("datetime64[ns]").astype(np.float64) / 1e9
+    if arr.dtype.kind in "biuf":
+        return arr.astype(np.float64, copy=False)
+    return arr.astype(np.float64)
+
+
+def _finite_xy(x, y):
+    x = _as_float_array(x)
+    y = _as_float_array(y)
+    if x.shape != y.shape:
+        n = min(len(x), len(y))
+        x = x[:n]
+        y = y[:n]
+    finite = np.isfinite(x) & np.isfinite(y)
+    return x[finite], y[finite]
+
+
+def _curve_pen(idx, width=1.25):
+    return pg.mkPen(color=pg.intColor(idx, hues=12, values=1, maxValue=220), width=width)
+
+
+class NumericAxisItem(pg.AxisItem):
+    def tickStrings(self, values, scale, spacing):
+        labels = []
+        for value in values:
+            v = value * scale
+            if not np.isfinite(v):
+                labels.append("")
+            elif abs(v) >= 1e4 or (abs(v) > 0 and abs(v) < 1e-3):
+                labels.append("{:.3g}".format(v))
+            elif spacing >= 1:
+                labels.append("{:.3f}".format(v).rstrip("0").rstrip("."))
+            else:
+                labels.append("{:.4f}".format(v).rstrip("0").rstrip("."))
+        return labels
+
+
+class DataFrameModel(QtCore.QAbstractTableModel):
+    def __init__(self, dataframe=None, max_rows=5000):
+        super().__init__()
+        self.max_rows = max_rows
+        self.dataframe = dataframe
+
+    def set_dataframe(self, dataframe):
+        self.beginResetModel()
+        self.dataframe = dataframe
+        self.endResetModel()
+
+    def rowCount(self, parent=None):
+        if self.dataframe is None:
+            return 0
+        return min(len(self.dataframe), self.max_rows)
+
+    def columnCount(self, parent=None):
+        if self.dataframe is None:
+            return 0
+        return len(self.dataframe.columns)
+
+    def data(self, index, role=QtCore.Qt.DisplayRole):
+        if role != QtCore.Qt.DisplayRole or self.dataframe is None or not index.isValid():
+            return None
+        value = self.dataframe.iat[index.row(), index.column()]
+        return "" if value is None else str(value)
+
+    def headerData(self, section, orientation, role=QtCore.Qt.DisplayRole):
+        if role != QtCore.Qt.DisplayRole or self.dataframe is None:
+            return None
+        if orientation == QtCore.Qt.Horizontal:
+            return str(self.dataframe.columns[section])
+        return str(section)
+
+
+class ScanDialog(QtWidgets.QDialog):
+    def __init__(self, file_formats, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Scan folder")
+        self.resize(620, 560)
+        self.file_formats = list(file_formats)
+        self.check_states = {}
+
+        root = QtWidgets.QVBoxLayout(self)
+
+        folder_row = QtWidgets.QHBoxLayout()
+        self.folder_edit = QtWidgets.QLineEdit()
+        self.folder_edit.setPlaceholderText("Folder containing simulation files")
+        browse_button = QtWidgets.QPushButton("Browse")
+        browse_button.clicked.connect(self.browse_folder)
+        folder_row.addWidget(self.folder_edit, 1)
+        folder_row.addWidget(browse_button)
+        root.addLayout(folder_row)
+
+        self.recursive_check = QtWidgets.QCheckBox("Include subfolders")
+        self.recursive_check.setChecked(True)
+        root.addWidget(self.recursive_check)
+
+        bladed_row = QtWidgets.QHBoxLayout()
+        bladed_row.addWidget(QtWidgets.QLabel("Bladed suffixes"))
+        self.bladed_suffix_edit = QtWidgets.QLineEdit()
+        self.bladed_suffix_edit.setPlaceholderText("04, 05, 298")
+        self.bladed_suffix_edit.setToolTip(
+            "Only for Bladed output scans. Example: 04 matches .$04, .%04, or .04."
+        )
+        bladed_row.addWidget(self.bladed_suffix_edit, 1)
+        root.addLayout(bladed_row)
+
+        filter_row = QtWidgets.QHBoxLayout()
+        self.format_filter = QtWidgets.QLineEdit()
+        self.format_filter.setPlaceholderText("Filter file types")
+        self.select_all_button = QtWidgets.QPushButton("All")
+        self.clear_button = QtWidgets.QPushButton("None")
+        filter_row.addWidget(self.format_filter, 1)
+        filter_row.addWidget(self.select_all_button)
+        filter_row.addWidget(self.clear_button)
+        root.addLayout(filter_row)
+
+        self.format_list = QtWidgets.QListWidget()
+        self.format_list.setSelectionMode(QtWidgets.QAbstractItemView.NoSelection)
+        root.addWidget(self.format_list, 1)
+
+        self.summary_label = QtWidgets.QLabel("Select one or more file types to scan.")
+        root.addWidget(self.summary_label)
+
+        buttons = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        root.addWidget(buttons)
+
+        self.format_filter.textChanged.connect(self.populate_formats)
+        self.select_all_button.clicked.connect(lambda: self.set_visible_checked(True))
+        self.clear_button.clicked.connect(lambda: self.set_visible_checked(False))
+        self.populate_formats()
+
+    def browse_folder(self):
+        folder = QtWidgets.QFileDialog.getExistingDirectory(self, "Select folder", self.folder_edit.text())
+        if folder:
+            self.folder_edit.setText(folder)
+
+    def populate_formats(self):
+        self.remember_checks()
+
+        self.format_list.clear()
+        text_filter = self.format_filter.text().strip().lower()
+        for i_fmt, fmt in enumerate(self.file_formats):
+            extensions = ", ".join(getattr(fmt, "extensions", []))
+            label = "{}  ({})".format(fmt.name, extensions)
+            if text_filter and text_filter not in label.lower():
+                continue
+            item = QtWidgets.QListWidgetItem(label)
+            item.setFlags(item.flags() | QtCore.Qt.ItemIsUserCheckable)
+            item.setCheckState(self.check_states.get(i_fmt, QtCore.Qt.Unchecked))
+            item.setData(QtCore.Qt.UserRole, i_fmt)
+            item.setData(QtCore.Qt.UserRole + 1, _format_specs(fmt))
+            self.format_list.addItem(item)
+
+    def set_visible_checked(self, checked):
+        state = QtCore.Qt.Checked if checked else QtCore.Qt.Unchecked
+        for row in range(self.format_list.count()):
+            item = self.format_list.item(row)
+            item.setCheckState(state)
+            self.check_states[item.data(QtCore.Qt.UserRole)] = state
+
+    def remember_checks(self):
+        for row in range(self.format_list.count()):
+            item = self.format_list.item(row)
+            self.check_states[item.data(QtCore.Qt.UserRole)] = item.checkState()
+
+    def selected_specs(self):
+        self.remember_checks()
+        specs = []
+        for i_fmt, state in self.check_states.items():
+            if state == QtCore.Qt.Checked:
+                specs.extend(_format_specs(self.file_formats[i_fmt]))
+        return specs
+
+    def selected_format_entries(self):
+        self.remember_checks()
+        entries = []
+        for i_fmt, state in self.check_states.items():
+            if state == QtCore.Qt.Checked:
+                fmt = self.file_formats[i_fmt]
+                entries.append((fmt, _format_specs(fmt)))
+        return entries
+
+    def selected_folder(self):
+        return self.folder_edit.text().strip()
+
+    def recursive(self):
+        return self.recursive_check.isChecked()
+
+    def bladed_suffixes(self):
+        return _parse_bladed_suffixes(self.bladed_suffix_edit.text())
+
+    def accept(self):
+        if not os.path.isdir(self.selected_folder()):
+            QtWidgets.QMessageBox.warning(self, "Scan folder", "Select a valid folder.")
+            return
+        if not self.selected_specs():
+            QtWidgets.QMessageBox.warning(self, "Scan folder", "Select at least one file type.")
+            return
+        super().accept()
+
+
+class QtPlotCanvas(pg.GraphicsLayoutWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent=parent)
+        pg.setConfigOptions(useOpenGL=True, antialias=False, background="w", foreground="k")
+        self.setBackground("w")
+        self._plots = []
+
+    def clear_plot(self):
+        self.clear()
+        self._plots = []
+
+    def plot_data(self, plot_data, *, subplots=False, sharex=True, grid=True,
+                  logx=False, logy=False, show_legend=True, line_width=1.25,
+                  marker=None, step=False):
+        self.clear_plot()
+        if len(plot_data) == 0:
+            return
+
+        groups = self._group_plot_data(plot_data, subplots)
+        previous_plot = None
+        curve_idx = 0
+        for i_group, group in enumerate(groups):
+            plot = self.addPlot(
+                row=i_group,
+                col=0,
+                axisItems={
+                    "bottom": NumericAxisItem(orientation="bottom"),
+                    "left": NumericAxisItem(orientation="left"),
+                    "top": NumericAxisItem(orientation="top"),
+                    "right": NumericAxisItem(orientation="right"),
+                },
+            )
+            if previous_plot is not None and sharex:
+                plot.setXLink(previous_plot)
+            previous_plot = plot
+            self._plots.append(plot)
+
+            self._style_plot(plot)
+            plot.showGrid(x=grid, y=grid, alpha=0.25)
+            ylabel = " and ".join(sorted(set(pd.sy for pd in group)))
+            if len(ylabel) < 120:
+                plot.setLabel("left", ylabel)
+            if i_group == len(groups) - 1:
+                plot.setLabel("bottom", PDL_xlabel(plot_data))
+            if show_legend:
+                plot.addLegend(offset=(10, 10), labelTextColor="k", brush=(255, 255, 255, 210))
+
+            for pd in group:
+                try:
+                    x, y = _finite_xy(pd.x, pd.y)
+                except Exception as exc:
+                    print("Skipping non-numeric curve {}: {}".format(pd.sy, exc))
+                    continue
+                if len(x) == 0:
+                    continue
+                item = plot.plot(
+                    x,
+                    y,
+                    name=pd.syl or pd.sy,
+                    pen=_curve_pen(curve_idx, width=line_width),
+                    symbol=marker,
+                    symbolSize=5 if marker else None,
+                    symbolBrush=pg.intColor(curve_idx, hues=12, values=1, maxValue=220) if marker else None,
+                    skipFiniteCheck=True,
+                )
+                item.setClipToView(True)
+                item.setDownsampling(auto=True, method="peak")
+                curve_idx += 1
+
+            if logx or logy:
+                plot.setLogMode(x=logx, y=logy)
+
+    @staticmethod
+    def _style_plot(plot):
+        plot.showAxis("bottom", True)
+        plot.showAxis("left", True)
+        plot.showAxis("top", True)
+        plot.showAxis("right", True)
+        tick_font = QtWidgets.QApplication.font()
+        tick_font.setPointSize(max(8, tick_font.pointSize()))
+        for axis_name in ("bottom", "left", "top", "right"):
+            axis = plot.getAxis(axis_name)
+            axis.setPen(pg.mkPen("k"))
+            axis.setTextPen(pg.mkPen("k"))
+            axis.setTickFont(tick_font)
+            axis.setStyle(showValues=True, tickLength=5, autoExpandTextSpace=False,
+                          autoReduceTextSpace=False)
+        plot.getAxis("bottom").setStyle(tickTextHeight=24)
+        plot.getAxis("left").setStyle(tickTextWidth=70)
+        plot.getAxis("bottom").showLabel(True)
+        plot.getAxis("left").showLabel(True)
+        plot.getAxis("top").setStyle(showValues=False)
+        plot.getAxis("right").setStyle(showValues=False)
+        plot.getViewBox().setBackgroundColor("w")
+        plot.getViewBox().setBorder(pg.mkPen((180, 180, 180)))
+
+    @staticmethod
+    def _group_plot_data(plot_data, subplots):
+        if not subplots:
+            return [plot_data]
+        labels = []
+        for pd in plot_data:
+            if pd.sy not in labels:
+                labels.append(pd.sy)
+        return [[pd for pd in plot_data if pd.sy == label] for label in labels]
+
+
+class MainWindow(QtWidgets.QMainWindow):
+    def __init__(self, filenames=None, dataframes=None, names=None):
+        super().__init__()
+        self.setWindowTitle("pyDatView Qt")
+        self.resize(1280, 820)
+        self.tab_list = TableList()
+        self.file_formats, self.file_format_errors = self._load_file_formats()
+        self.plot_data = []
+        self.current_files = []
+
+        self._build_ui()
+        self._connect()
+        self._show_file_format_errors()
+
+        if dataframes is not None:
+            self.load_dfs(dataframes, names=names)
+        if filenames:
+            self.load_files(filenames, add=False)
+
+    def _load_file_formats(self):
+        io_userpath = os.path.join(weio.defaultUserDataDir(), "pydatview_io")
+        return weio.fileFormats(userpath=io_userpath, ignoreErrors=True, verbose=False)
+
+    def _build_ui(self):
+        self._build_actions()
+
+        central = QtWidgets.QWidget()
+        self.setCentralWidget(central)
+        root = QtWidgets.QVBoxLayout(central)
+        root.setContentsMargins(6, 6, 6, 6)
+
+        top = QtWidgets.QHBoxLayout()
+        root.addLayout(top)
+        self.plot_type_combo = QtWidgets.QComboBox()
+        self.plot_type_combo.addItems(["Regular", "PDF", "FFT", "MinMax"])
+        self.mode_combo = QtWidgets.QComboBox()
+        self.mode_combo.addItems(["Overlay", "Subplots"])
+        self.live_plot = QtWidgets.QCheckBox("Live plot")
+        self.live_plot.setChecked(True)
+        self.grid_check = QtWidgets.QCheckBox("Grid")
+        self.grid_check.setChecked(True)
+        self.logx_check = QtWidgets.QCheckBox("Log x")
+        self.logy_check = QtWidgets.QCheckBox("Log y")
+        self.legend_check = QtWidgets.QCheckBox("Legend")
+        self.legend_check.setChecked(True)
+        self.line_width_spin = QtWidgets.QDoubleSpinBox()
+        self.line_width_spin.setRange(0.25, 8.0)
+        self.line_width_spin.setSingleStep(0.25)
+        self.line_width_spin.setValue(1.25)
+        self.marker_combo = QtWidgets.QComboBox()
+        self.marker_combo.addItems(["None", "Circle", "Square", "Triangle", "Diamond"])
+        self.status_label = QtWidgets.QLabel("No files loaded")
+        top.addWidget(QtWidgets.QLabel("Plot:"))
+        top.addWidget(self.plot_type_combo)
+        top.addWidget(QtWidgets.QLabel("Mode:"))
+        top.addWidget(self.mode_combo)
+        top.addWidget(self.live_plot)
+        top.addWidget(self.grid_check)
+        top.addWidget(self.logx_check)
+        top.addWidget(self.logy_check)
+        top.addWidget(self.legend_check)
+        top.addWidget(QtWidgets.QLabel("LW:"))
+        top.addWidget(self.line_width_spin)
+        top.addWidget(QtWidgets.QLabel("Marker:"))
+        top.addWidget(self.marker_combo)
+        top.addStretch(1)
+        top.addWidget(self.status_label)
+
+        splitter = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
+        root.addWidget(splitter, 1)
+
+        side = QtWidgets.QWidget()
+        side_layout = QtWidgets.QVBoxLayout(side)
+        side_layout.setContentsMargins(0, 0, 0, 0)
+
+        side_layout.addWidget(QtWidgets.QLabel("Tables"))
+        self.table_list_widget = QtWidgets.QListWidget()
+        self.table_list_widget.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
+        side_layout.addWidget(self.table_list_widget, 2)
+
+        side_layout.addWidget(QtWidgets.QLabel("X column"))
+        self.column_filter = QtWidgets.QLineEdit()
+        self.column_filter.setPlaceholderText("Filter columns")
+        side_layout.addWidget(self.column_filter)
+        self.x_combo = QtWidgets.QComboBox()
+        side_layout.addWidget(self.x_combo)
+
+        side_layout.addWidget(QtWidgets.QLabel("Y columns"))
+        self.y_list_widget = QtWidgets.QListWidget()
+        self.y_list_widget.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
+        side_layout.addWidget(self.y_list_widget, 3)
+
+        button_row = QtWidgets.QHBoxLayout()
+        self.plot_button = QtWidgets.QPushButton("Plot")
+        self.clear_button = QtWidgets.QPushButton("Clear")
+        self.select_all_y_button = QtWidgets.QPushButton("All Y")
+        self.select_none_y_button = QtWidgets.QPushButton("None")
+        button_row.addWidget(self.plot_button)
+        button_row.addWidget(self.clear_button)
+        button_row.addWidget(self.select_all_y_button)
+        button_row.addWidget(self.select_none_y_button)
+        side_layout.addLayout(button_row)
+
+        self.canvas = QtPlotCanvas()
+        self.detail_tabs = QtWidgets.QTabWidget()
+        self.table_model = DataFrameModel()
+        self.table_view = QtWidgets.QTableView()
+        self.table_view.setModel(self.table_model)
+        self.table_view.setAlternatingRowColors(True)
+        self.table_view.setSortingEnabled(False)
+        self.table_view.horizontalHeader().setStretchLastSection(False)
+        self.info_text = QtWidgets.QPlainTextEdit()
+        self.info_text.setReadOnly(True)
+        self.stats_text = QtWidgets.QPlainTextEdit()
+        self.stats_text.setReadOnly(True)
+        self.detail_tabs.addTab(self.table_view, "Data")
+        self.detail_tabs.addTab(self.stats_text, "Stats")
+        self.detail_tabs.addTab(self.info_text, "File info")
+
+        right_splitter = QtWidgets.QSplitter(QtCore.Qt.Vertical)
+        right_splitter.addWidget(self.canvas)
+        right_splitter.addWidget(self.detail_tabs)
+        right_splitter.setStretchFactor(0, 4)
+        right_splitter.setStretchFactor(1, 1)
+        right_splitter.setSizes([620, 180])
+
+        splitter.addWidget(side)
+        splitter.addWidget(right_splitter)
+        splitter.setStretchFactor(0, 0)
+        splitter.setStretchFactor(1, 1)
+        splitter.setSizes([320, 960])
+
+        self.setStatusBar(QtWidgets.QStatusBar())
+
+    def _build_actions(self):
+        file_menu = self.menuBar().addMenu("&File")
+        self.open_action = file_menu.addAction("Open")
+        self.add_action = file_menu.addAction("Add")
+        self.reload_action = file_menu.addAction("Reload")
+        self.scan_action = file_menu.addAction(QtGui.QIcon(_resource_path("icons", "scan.png")), "Scan folder")
+        export_action = file_menu.addAction("Export selected table")
+        file_menu.addSeparator()
+        quit_action = file_menu.addAction("Quit")
+        self.open_action.triggered.connect(lambda: self.select_files(add=False))
+        self.add_action.triggered.connect(lambda: self.select_files(add=True))
+        self.reload_action.triggered.connect(self.reload_files)
+        self.scan_action.triggered.connect(self.scan_folder)
+        export_action.triggered.connect(self.export_selected_table)
+        quit_action.triggered.connect(self.close)
+
+        toolbar = self.addToolBar("Main")
+        toolbar.setObjectName("main_toolbar")
+        toolbar.setIconSize(QtCore.QSize(24, 24))
+        toolbar.addAction(self.open_action)
+        toolbar.addAction(self.add_action)
+        toolbar.addAction(self.reload_action)
+        toolbar.addSeparator()
+        toolbar.addAction(self.scan_action)
+
+        view_menu = self.menuBar().addMenu("&View")
+        self.autorange_action = view_menu.addAction("Auto range")
+        self.autorange_action.triggered.connect(self.auto_range)
+        export_plot_action = view_menu.addAction("Export plot image")
+        export_plot_action.triggered.connect(self.export_plot_image)
+
+    def _connect(self):
+        self.table_list_widget.itemSelectionChanged.connect(self.on_table_selection_changed)
+        self.plot_type_combo.currentIndexChanged.connect(self.on_selection_changed)
+        self.x_combo.currentIndexChanged.connect(self.on_selection_changed)
+        self.y_list_widget.itemSelectionChanged.connect(self.on_selection_changed)
+        self.mode_combo.currentIndexChanged.connect(self.on_selection_changed)
+        self.grid_check.stateChanged.connect(self.on_selection_changed)
+        self.logx_check.stateChanged.connect(self.on_selection_changed)
+        self.logy_check.stateChanged.connect(self.on_selection_changed)
+        self.legend_check.stateChanged.connect(self.on_selection_changed)
+        self.line_width_spin.valueChanged.connect(self.on_selection_changed)
+        self.marker_combo.currentIndexChanged.connect(self.on_selection_changed)
+        self.column_filter.textChanged.connect(self.populate_columns)
+        self.plot_button.clicked.connect(self.redraw)
+        self.clear_button.clicked.connect(self.clear)
+        self.select_all_y_button.clicked.connect(self.select_all_y)
+        self.select_none_y_button.clicked.connect(self.select_none_y)
+
+    def _show_file_format_errors(self):
+        for err in self.file_format_errors:
+            self.statusBar().showMessage(str(err), 10000)
+
+    def select_files(self, add=False):
+        filenames, _ = QtWidgets.QFileDialog.getOpenFileNames(
+            self,
+            "Open files",
+            "",
+            "All supported files (*);;All files (*)",
+        )
+        if filenames:
+            self.load_files(filenames, add=add)
+
+    def scan_folder(self):
+        dialog = ScanDialog(self.file_formats, self)
+        if dialog.exec() != QtWidgets.QDialog.Accepted:
+            return
+
+        folder = dialog.selected_folder()
+        format_entries = dialog.selected_format_entries()
+        recursive = dialog.recursive()
+        bladed_suffixes = dialog.bladed_suffixes()
+        try:
+            QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.WaitCursor)
+            t0 = time.perf_counter()
+            self.statusBar().showMessage("Scanning {} ...".format(folder))
+            QtWidgets.QApplication.processEvents()
+            matches = scan_readable_file_matches(
+                folder,
+                format_entries,
+                recursive=recursive,
+                bladed_suffixes=bladed_suffixes,
+            )
+            scan_seconds = time.perf_counter() - t0
+        finally:
+            QtWidgets.QApplication.restoreOverrideCursor()
+
+        if not matches:
+            QtWidgets.QMessageBox.information(
+                self,
+                "Scan folder",
+                "No matching readable files were found in:\n{}".format(folder),
+            )
+            self.statusBar().showMessage("Scan found no files in {:.3f}s".format(scan_seconds), 8000)
+            return
+
+        self.statusBar().showMessage(
+            "Scan found {:,} files in {:.3f}s; loading ...".format(len(matches), scan_seconds)
+        )
+        filenames = [path for path, _ in matches]
+        fileformats = [fmt for _, fmt in matches]
+        load_seconds = self.load_files(
+            filenames,
+            add=False,
+            fileformats=fileformats,
+            status_prefix="Loading scanned files",
+        )
+        if load_seconds is not None:
+            self.statusBar().showMessage(
+                "Scanned {:,} files in {:.3f}s; loaded in {:.3f}s".format(
+                    len(filenames), scan_seconds, load_seconds
+                ),
+                12000,
+            )
+
+    def load_files(self, filenames, add=False, fileformats=None, status_prefix="Loading files"):
+        t0 = time.perf_counter()
+        try:
+            if fileformats is None:
+                pairs = [(f, None) for f in filenames if os.path.isfile(f)]
+            else:
+                pairs = [(f, ff) for f, ff in zip(filenames, fileformats) if os.path.isfile(f)]
+            pairs = sorted(pairs, key=lambda item: item[0])
+            filenames = [f for f, _ in pairs]
+            fileformats = [ff for _, ff in pairs]
+            if not filenames:
+                return None
+            if not add:
+                self.tab_list.clean()
+                self.current_files = []
+
+            last_status = {"t": 0.0}
+
+            def status_function(i):
+                now = time.perf_counter()
+                if i == 0 or i == len(filenames) - 1 or now - last_status["t"] > 0.15:
+                    last_status["t"] = now
+                    self.status_label.setText("{} {}/{}".format(status_prefix, i + 1, len(filenames)))
+                    self.statusBar().showMessage("{} {}/{}".format(status_prefix, i + 1, len(filenames)))
+                    QtWidgets.QApplication.processEvents()
+
+            new_tabs, warnings = self.tab_list.load_tables_from_files(
+                filenames=filenames,
+                fileformats=fileformats,
+                bAdd=add,
+                bReload=False,
+                statusFunction=status_function,
+            )
+            self.current_files = self.tab_list.filenames
+            warnings = [warning for warning in warnings if warning]
+            if warnings:
+                shown = "\n\n".join(warnings[:5])
+                if len(warnings) > 5:
+                    shown += "\n\n... {} more warnings".format(len(warnings) - 5)
+                QtWidgets.QMessageBox.warning(self, "Load warnings", shown)
+            if len(new_tabs) == 0 and len(self.tab_list) == 0:
+                self.status_label.setText("No tables loaded")
+                return time.perf_counter() - t0
+            self.populate_tables()
+            self.status_label.setText("{} tables loaded".format(len(self.tab_list)))
+            self.redraw()
+            return time.perf_counter() - t0
+        except Exception as exc:
+            self.show_exception("Failed to load files", exc)
+            return None
+
+    def load_dfs(self, dataframes, names=None):
+        if not isinstance(dataframes, list):
+            dataframes = [dataframes]
+        if names is None:
+            names = ["df{}".format(i + 1) for i in range(len(dataframes))]
+        if not isinstance(names, list):
+            names = [names]
+        self.tab_list.from_dataframes(dataframes=dataframes, names=names, bAdd=False)
+        self.populate_tables()
+        self.redraw()
+
+    def reload_files(self):
+        filenames = sorted(set(f for f in self.current_files if f))
+        if filenames:
+            self.load_files(filenames, add=False)
+
+    def populate_tables(self):
+        self.table_list_widget.blockSignals(True)
+        self.table_list_widget.clear()
+        names = self.tab_list.getDisplayTabNames()
+        for i, tab in enumerate(self.tab_list):
+            item = QtWidgets.QListWidgetItem("{}  ({})".format(names[i], tab.shapestring))
+            item.setData(QtCore.Qt.UserRole, i)
+            self.table_list_widget.addItem(item)
+        if self.table_list_widget.count() > 0:
+            self.table_list_widget.item(0).setSelected(True)
+        self.table_list_widget.blockSignals(False)
+        self.on_table_selection_changed()
+
+    def selected_table_indices(self):
+        items = self.table_list_widget.selectedItems()
+        return [item.data(QtCore.Qt.UserRole) for item in items]
+
+    def on_table_selection_changed(self):
+        self.populate_columns()
+        self.update_table_preview()
+        self.update_file_info()
+        self.on_selection_changed()
+
+    def populate_columns(self):
+        previous_x = self.x_combo.currentData()
+        previous_y = set(self.selected_y_indices_original())
+        indices = self.selected_table_indices()
+        if not indices and len(self.tab_list) > 0:
+            indices = [0]
+        columns = []
+        if indices:
+            columns = list(self.tab_list[indices[0]].columns)
+        text_filter = self.column_filter.text().strip().lower()
+        visible = [(i, str(col)) for i, col in enumerate(columns)
+                   if not text_filter or text_filter in str(col).lower()]
+
+        self.x_combo.blockSignals(True)
+        self.y_list_widget.blockSignals(True)
+        self.x_combo.clear()
+        self.y_list_widget.clear()
+        for original_i, col in visible:
+            self.x_combo.addItem(col, original_i)
+            item = QtWidgets.QListWidgetItem(col)
+            item.setData(QtCore.Qt.UserRole, original_i)
+            self.y_list_widget.addItem(item)
+
+        if visible:
+            x_to_select = previous_x if previous_x is not None else visible[0][0]
+            x_visible = [i for i, _ in visible]
+            self.x_combo.setCurrentIndex(x_visible.index(x_to_select) if x_to_select in x_visible else 0)
+        if visible and not previous_y and len(visible) > 1:
+            self.y_list_widget.item(1).setSelected(True)
+        else:
+            for row in range(self.y_list_widget.count()):
+                item = self.y_list_widget.item(row)
+                if item.data(QtCore.Qt.UserRole) in previous_y:
+                    item.setSelected(True)
+        self.x_combo.blockSignals(False)
+        self.y_list_widget.blockSignals(False)
+
+    def on_selection_changed(self):
+        if self.live_plot.isChecked():
+            self.redraw()
+
+    def select_all_y(self):
+        self.y_list_widget.blockSignals(True)
+        for row in range(self.y_list_widget.count()):
+            self.y_list_widget.item(row).setSelected(True)
+        self.y_list_widget.blockSignals(False)
+        self.on_selection_changed()
+
+    def select_none_y(self):
+        self.y_list_widget.blockSignals(True)
+        for row in range(self.y_list_widget.count()):
+            self.y_list_widget.item(row).setSelected(False)
+        self.y_list_widget.blockSignals(False)
+        self.on_selection_changed()
+
+    def selected_y_indices(self):
+        return self.selected_y_indices_original()
+
+    def selected_y_indices_original(self):
+        return [item.data(QtCore.Qt.UserRole) for item in self.y_list_widget.selectedItems()]
+
+    def build_plot_data(self):
+        plot_data = []
+        table_indices = self.selected_table_indices()
+        y_indices = self.selected_y_indices()
+        ix = self.x_combo.currentData()
+        if ix is None or not y_indices or not table_indices:
+            return plot_data
+
+        same_col = len(table_indices) > 1
+        for it in table_indices:
+            tab = self.tab_list[it]
+            for iy in y_indices:
+                if iy >= len(tab.columns):
+                    continue
+                idx = (it, ix, iy, str(tab.columns[ix]), str(tab.columns[iy]), tab.active_name)
+                pd = PlotData()
+                pd.fromIDs(self.tab_list, len(plot_data), idx, same_col, pipeline=None)
+                self.apply_plot_type(pd)
+                if len(table_indices) == 1:
+                    pd.syl = pd.sy
+                else:
+                    pd.syl = "{} - {}".format(pd.st, pd.sy)
+                plot_data.append(pd)
+        return plot_data
+
+    def apply_plot_type(self, pd):
+        plot_type = self.plot_type_combo.currentText()
+        if plot_type == "PDF":
+            pd.toPDF(nBins=101, smooth=False)
+        elif plot_type == "FFT":
+            pd.toFFT(yType="PSD", xType="1/x", avgMethod="Welch", avgWindow="Hamming",
+                     bDetrend=True, nExp=11, nPerDecade=20)
+        elif plot_type == "MinMax":
+            pd.toMinMax(xScale=False, yScale=True, yCenter="None")
+
+    def redraw(self):
+        try:
+            self.plot_data = self.build_plot_data()
+            self.canvas.plot_data(
+                self.plot_data,
+                subplots=self.mode_combo.currentText() == "Subplots",
+                sharex=True,
+                grid=self.grid_check.isChecked(),
+                logx=self.logx_check.isChecked(),
+                logy=self.logy_check.isChecked(),
+                show_legend=self.legend_check.isChecked(),
+                line_width=self.line_width_spin.value(),
+                marker=self.marker_symbol(),
+            )
+            n_curves = len(self.plot_data)
+            n_points = sum(len(pd.y) for pd in self.plot_data)
+            self.update_stats()
+            self.statusBar().showMessage("{} curves, {:,} points".format(n_curves, n_points))
+        except Exception as exc:
+            self.show_exception("Failed to plot data", exc)
+
+    def clear(self):
+        self.canvas.clear_plot()
+        self.plot_data = []
+
+    def auto_range(self):
+        for plot in self.canvas._plots:
+            plot.autoRange()
+
+    def marker_symbol(self):
+        return {
+            "None": None,
+            "Circle": "o",
+            "Square": "s",
+            "Triangle": "t",
+            "Diamond": "d",
+        }.get(self.marker_combo.currentText(), None)
+
+    def update_table_preview(self):
+        indices = self.selected_table_indices()
+        if not indices:
+            self.table_model.set_dataframe(None)
+            return
+        self.table_model.set_dataframe(self.tab_list[indices[0]].data)
+        self.table_view.resizeColumnsToContents()
+
+    def update_file_info(self):
+        indices = self.selected_table_indices()
+        if not indices:
+            self.info_text.clear()
+            return
+        lines = []
+        for it in indices:
+            tab = self.tab_list[it]
+            lines.append("Table: {}".format(tab.active_name))
+            lines.append("File: {}".format(tab.filename))
+            lines.append("Format: {}".format(tab.fileformat_name))
+            lines.append("Shape: {}".format(tab.shapestring))
+            lines.append("Columns: {}".format(", ".join(map(str, tab.columns[:40]))))
+            if len(tab.columns) > 40:
+                lines.append("...")
+            lines.append("")
+        self.info_text.setPlainText("\n".join(lines))
+
+    def update_stats(self):
+        if not self.plot_data:
+            self.stats_text.clear()
+            return
+        lines = []
+        for pd in self.plot_data:
+            try:
+                _, y = _finite_xy(pd.x, pd.y)
+            except Exception:
+                continue
+            if len(y) == 0:
+                continue
+            lines.append(pd.syl or pd.sy)
+            lines.append("  n    = {:,}".format(len(y)))
+            lines.append("  min  = {:.6g}".format(np.nanmin(y)))
+            lines.append("  mean = {:.6g}".format(np.nanmean(y)))
+            lines.append("  max  = {:.6g}".format(np.nanmax(y)))
+            lines.append("  std  = {:.6g}".format(np.nanstd(y)))
+            lines.append("")
+        self.stats_text.setPlainText("\n".join(lines))
+
+    def export_plot_image(self):
+        if not self.canvas._plots:
+            return
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self,
+            "Export plot image",
+            "pydatview_plot.png",
+            "PNG files (*.png);;SVG files (*.svg);;All files (*)",
+        )
+        if not path:
+            return
+        try:
+            from pyqtgraph.exporters import ImageExporter, SVGExporter
+            exporter_cls = SVGExporter if path.lower().endswith(".svg") else ImageExporter
+            exporter = exporter_cls(self.canvas.scene())
+            exporter.export(path)
+        except Exception as exc:
+            self.show_exception("Failed to export plot image", exc)
+
+    def export_selected_table(self):
+        indices = self.selected_table_indices()
+        if not indices:
+            return
+        tab = self.tab_list[indices[0]]
+        default = (tab.basename if tab.filename else tab.name) + ".csv"
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self,
+            "Export selected table",
+            default,
+            "CSV files (*.csv);;All files (*)",
+        )
+        if path:
+            try:
+                tab.export(path=path, fformat="csv")
+            except Exception as exc:
+                self.show_exception("Failed to export table", exc)
+
+    def show_exception(self, title, exc):
+        traceback.print_exc()
+        QtWidgets.QMessageBox.critical(self, title, "{}\n\n{}".format(exc, traceback.format_exc(limit=5)))
+
+
+def showApp(firstArg=None, dataframes=None, filenames=None, names=None):
+    app = QtWidgets.QApplication.instance()
+    if app is None:
+        app = QtWidgets.QApplication(sys.argv[:1])
+    if filenames is None:
+        filenames = []
+    if firstArg is not None:
+        if isinstance(firstArg, list):
+            if len(firstArg) > 0 and isinstance(firstArg[0], str):
+                filenames = firstArg
+            else:
+                dataframes = firstArg
+        elif isinstance(firstArg, str):
+            filenames = [firstArg]
+        else:
+            dataframes = [firstArg]
+    window = MainWindow(filenames=filenames, dataframes=dataframes, names=names)
+    window.show()
+    return app.exec()
+
+
+def cmdline():
+    filenames = sys.argv[1:] if len(sys.argv) > 1 else []
+    return showApp(filenames=filenames)
+
+
+if __name__ == "__main__":
+    raise SystemExit(cmdline())

@@ -157,8 +157,14 @@ class TableList(object): # todo inherit list
                 warn = 'Error: Inconsistency in the file format!\n\nFile: '+filename+'\n\n'   \
                        'The reported error was:\n\n'+e.args[0]+'\n\n' +   \
                        'Double-check your file format and report this error if you think it''s a bug.'
-            except:
-                raise
+            except UnicodeDecodeError as e:
+                warn = 'Error: Text decoding failed while opening file:\n\n {}\n\n{}: {}\n'.format(
+                    filename, type(e).__name__, e
+                )
+            except Exception as e:
+                warn = 'Error: Failed to open file:\n\n {}\n\n{}: {}\n'.format(
+                    filename, type(e).__name__, e
+                )
         if len(warn)>0:
             return tabs, warn
 
@@ -1028,7 +1034,6 @@ if __name__ == '__main__':
     import pandas as pd;
     from Tables import Table
     import numpy as np
-
 
 
 

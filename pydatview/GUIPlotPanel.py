@@ -1,4 +1,8 @@
 import os
+import pickle
+import subprocess
+import sys
+import tempfile
 import numpy as np
 import wx
 import wx.lib.buttons  as  buttons
@@ -625,6 +629,7 @@ class PlotPanel(wx.Panel):
         self.cbSwapXY     = wx.CheckBox(self.ctrlPanel, -1, 'Swap XY',(10,10))
         self.cbFlipX      = wx.CheckBox(self.ctrlPanel, -1, 'Flip X',(10,10))
         self.cbFlipY      = wx.CheckBox(self.ctrlPanel, -1, 'Flip Y',(10,10))
+        self.btFastPlot   = wx.Button(self.ctrlPanel, wx.ID_ANY, 'Fast Plot')
         #self.cbSub.SetValue(True) # DEFAULT TO SUB?
         self.cbSync.SetValue(True)
         self.cbXHair.SetValue(self.data['CrossHair']) # Have cross hair by default
@@ -646,8 +651,9 @@ class PlotPanel(wx.Panel):
         self.Bind(wx.EVT_CHECKBOX, self.swap_event       , self.cbSwapXY )
         self.Bind(wx.EVT_CHECKBOX, self.redraw_event     , self.cbFlipX )
         self.Bind(wx.EVT_CHECKBOX, self.redraw_event     , self.cbFlipY )
+        self.Bind(wx.EVT_BUTTON  , self.onFastPlot       , self.btFastPlot)
         # LAYOUT
-        cb_sizer  = wx.FlexGridSizer(rows=5, cols=3, hgap=0, vgap=0)
+        cb_sizer  = wx.FlexGridSizer(rows=0, cols=3, hgap=0, vgap=0)
         cb_sizer.Add(self.cbCurveType , 0, flag=wx.ALL, border=1)
         cb_sizer.Add(self.cbSub       , 0, flag=wx.ALL, border=1)
         cb_sizer.Add(self.cbAutoScale , 0, flag=wx.ALL, border=1)
@@ -663,6 +669,7 @@ class PlotPanel(wx.Panel):
         cb_sizer.Add(self.cbSwapXY    , 0, flag=wx.ALL, border=1)
         cb_sizer.Add(self.cbFlipX     , 0, flag=wx.ALL, border=1)
         cb_sizer.Add(self.cbFlipY     , 0, flag=wx.ALL, border=1)
+        cb_sizer.Add(self.btFastPlot  , 0, flag=wx.ALL, border=1)
 
         self.ctrlPanel.SetSizer(cb_sizer)
 
@@ -1089,6 +1096,92 @@ class PlotPanel(wx.Panel):
         self.toolSizer.Add(self.toolPanel, 0, wx.EXPAND|wx.ALL, 5)
         self.plotsizer.Layout()
         self.Thaw()
+
+    def onFastPlot(self, event=None):
+        """Open the current curves in a PySide6/PyQtGraph fast plot process."""
+        try:
+            import importlib.util
+            if importlib.util.find_spec('PySide6') is None or importlib.util.find_spec('pyqtgraph') is None:
+                Error(self, 'Fast Plot requires PySide6 and pyqtgraph.\n\nInstall them with:\n  pip install PySide6 pyqtgraph')
+                return
+
+            if len(self.plotData) == 0:
+                self.getPlotData()
+                if self.pltTypePanel.cbCompare.GetValue():
+                    self.PD_Compare(self.findPlotMode(self.plotData))
+            if len(self.plotData) == 0:
+                Error(self, 'Plot some numeric data first')
+                return
+
+            payload = self._fast_plot_payload()
+            tmp = tempfile.NamedTemporaryFile(prefix='pydatview_fastplot_', suffix='.pkl', delete=False)
+            try:
+                with tmp:
+                    pickle.dump(payload, tmp, protocol=pickle.HIGHEST_PROTOCOL)
+                subprocess.Popen(
+                    [sys.executable, '-m', 'pydatview.fastplot_qt', tmp.name],
+                    cwd=os.path.dirname(os.path.dirname(__file__)),
+                )
+            except Exception:
+                try:
+                    os.unlink(tmp.name)
+                except OSError:
+                    pass
+                raise
+        except Exception as e:
+            Error(self, exception2string(e))
+
+    def _fast_plot_payload(self):
+        plotStyle, plot_options, _, _ = self.getPlotOptions()
+        mode = self.findPlotMode(self.plotData)
+        if not self.pltTypePanel.cbCompare.GetValue():
+            self.setLegendLabels(mode)
+        nPlots, spreadBy = self.findSubPlots(self.plotData, mode)
+        groups = self._fast_plot_groups(nPlots, spreadBy)
+
+        payload = {
+            'title': 'pyDatView Fast Plot',
+            'groups': groups,
+            'xlabel': PDL_xlabel(self.plotData),
+            'sharex': self.sharex,
+            'grid': self.cbGrid.IsChecked(),
+            'logx': self.cbLogX.IsChecked(),
+            'logy': self.cbLogY.IsChecked(),
+            'legend': plotStyle['LegendPosition'],
+        }
+        return payload
+
+    def _fast_plot_groups(self, nPlots, spreadBy):
+        groups = [{'curves': [], 'xlabel': '', 'ylabel': ''} for _ in range(max(1, nPlots))]
+        for ipd, pd in enumerate(self.plotData):
+            igroup = self._fast_plot_group_index(ipd, pd, nPlots, spreadBy)
+            label = pd.syl if len(pd.syl) > 0 else pd.sy
+            groups[igroup]['curves'].append({
+                'x': pd.x,
+                'y': pd.y,
+                'label': label,
+                'swap_xy': self.cbSwapXY.IsChecked(),
+            })
+
+        for igroup, group in enumerate(groups):
+            ylabels = unique([pd.sy for i, pd in enumerate(self.plotData)
+                              if self._fast_plot_group_index(i, pd, nPlots, spreadBy) == igroup])
+            if len(ylabels) <= 3:
+                group['ylabel'] = ' and '.join(ylabels)
+        if groups:
+            groups[-1]['xlabel'] = PDL_xlabel(self.plotData)
+        return groups
+
+    def _fast_plot_group_index(self, ipd, pd, nPlots, spreadBy):
+        if nPlots <= 1 or spreadBy == 'none':
+            return 0
+        if spreadBy == 'iy':
+            return min(unique([p.iy for p in self.plotData]).index(pd.iy), nPlots - 1)
+        if spreadBy == 'it':
+            return min(unique([p.it for p in self.plotData]).index(pd.it), nPlots - 1)
+        if spreadBy == 'mod-ip':
+            return int(np.mod(ipd, nPlots))
+        return 0
 
 
     def setPD_PDF(self,PD,c):
@@ -1899,5 +1992,3 @@ if __name__ == '__main__':
     self.SetSize((900, 600))
     self.Show()
     app.MainLoop()
-
-

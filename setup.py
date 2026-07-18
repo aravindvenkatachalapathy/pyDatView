@@ -9,6 +9,20 @@ setup(
     author_email='lastname@gmail.com',
     license='MIT',
     packages=['pydatview'],
+    install_requires=[
+        'openpyxl',
+        'numpy',
+        'pandas',
+        'xarray',
+        'pyarrow',
+        'matplotlib',
+        'chardet',
+        'scipy',
+        'PySide6',
+        'pyqtgraph',
+    ],
+    extras_require={
+        'legacy_wx': ['wxpython'],
+    },
     zip_safe=False
 )
-
