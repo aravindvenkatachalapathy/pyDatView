@@ -196,9 +196,9 @@ def changeUnits(df, flavor='SI', inPlace=True):
         u=u.lower()
         scalings = {}
         #        OLD      =     NEW
-        scalings['rpm']   =  (np.pi/30,'rad/s') 
-        scalings['rad' ]  =   (180/np.pi,'deg')
-        scalings['deg/s' ] =   (np.pi/180,'rad/s')
+        scalings['rpm']    =  (np.pi/30,'rad/s')
+        scalings['deg']    =  (np.pi/180,'rad')
+        scalings['deg/s' ] =  (np.pi/180,'rad/s')
         scalings['mn']     =   (1e6, 'N')
         scalings['kn']     =   (1e3, 'N')
         scalings['mnm']    =   (1e6, 'Nm')
@@ -236,4 +236,3 @@ def changeUnits(df, flavor='SI', inPlace=True):
     else:
         raise NotImplementedError(flavor)
     return df
-

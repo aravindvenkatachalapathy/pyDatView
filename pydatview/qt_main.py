@@ -954,6 +954,8 @@ class MainWindow(QtWidgets.QMainWindow):
         view_menu = self.menuBar().addMenu("&View")
         self.autorange_action = view_menu.addAction("Auto range")
         self.autorange_action.triggered.connect(self.auto_range)
+        self.standardize_si_action = view_menu.addAction("Standardize units to SI")
+        self.standardize_si_action.triggered.connect(self.standardize_units_si)
         export_plot_action = view_menu.addAction("Export plot image")
         export_plot_action.triggered.connect(self.export_plot_image)
 
@@ -1493,6 +1495,34 @@ class MainWindow(QtWidgets.QMainWindow):
             points=meta.get("points", 0),
         )
         self.statusBar().showMessage(message)
+
+    def standardize_units_si(self):
+        indices = self.selected_table_indices(load=False)
+        if not indices:
+            indices = list(range(len(self.tab_list)))
+        if not indices:
+            self.statusBar().showMessage("No loaded tables to standardize", 8000)
+            return
+
+        changed = 0
+        for it in indices:
+            tab = self.tab_list[it]
+            before = list(tab.data.columns)
+            tab.changeUnits(data={"flavor": "SI"})
+            after = list(tab.data.columns)
+            if before != after:
+                changed += 1
+                print("[pyDatView] Standardized units to SI: {}".format(tab.active_name))
+
+        self.populate_columns()
+        self.update_table_preview()
+        self.update_file_info()
+        if self.live_plot.isChecked() and not self.has_unloaded_lazy_selection():
+            self.redraw()
+        self.statusBar().showMessage(
+            "Standardized units to SI for {:,} loaded table(s), {:,} changed".format(len(indices), changed),
+            12000,
+        )
 
     def clear(self):
         self.canvas.clear_plot()
