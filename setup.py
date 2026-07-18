@@ -13,6 +13,7 @@ setup(
         'openpyxl',
         'numpy',
         'pandas',
+        'polars',
         'xarray',
         'pyarrow',
         'matplotlib',

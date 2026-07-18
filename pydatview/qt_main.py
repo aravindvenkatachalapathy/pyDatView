@@ -19,6 +19,23 @@ from pydatview.plotdata import PlotData, PDL_xlabel
 import pydatview.io as weio
 
 
+def _remove_user_site_for_conda_qt():
+    if "conda" not in sys.version.lower() and "conda" not in sys.prefix.lower():
+        return
+    try:
+        import site
+        user_site = site.getusersitepackages()
+    except Exception:
+        return
+    if not user_site:
+        return
+    user_site = os.path.abspath(user_site)
+    sys.path[:] = [p for p in sys.path if os.path.abspath(p or os.getcwd()) != user_site]
+
+
+_remove_user_site_for_conda_qt()
+
+
 def _require_qt():
     try:
         from PySide6 import QtCore, QtGui, QtWidgets
@@ -43,6 +60,7 @@ class LazyFileEntry:
     table_indices: list = field(default_factory=list)
     warning: str = ""
     attempted: bool = False
+    loading: bool = False
 
     @property
     def loaded(self):
@@ -51,6 +69,31 @@ class LazyFileEntry:
     @property
     def basename(self):
         return os.path.basename(self.path)
+
+
+class LazyLoadWorker(QtCore.QObject):
+    finished = QtCore.Signal(int, int, object, str, float)
+
+    def __init__(self, generation, lazy_index, path, file_format, options):
+        super().__init__()
+        self.generation = generation
+        self.lazy_index = lazy_index
+        self.path = path
+        self.file_format = file_format
+        self.options = dict(options)
+
+    @QtCore.Slot()
+    def run(self):
+        t0 = time.perf_counter()
+        try:
+            loader = TableList(options=self.options)
+            tabs, warning = loader._load_file_tabs(self.path, fileformat=self.file_format, bReload=False)
+        except Exception as exc:
+            tabs = []
+            warning = "Error: Failed to open file:\n\n {}\n\n{}: {}\n".format(
+                self.path, type(exc).__name__, exc
+            )
+        self.finished.emit(self.generation, self.lazy_index, tabs, warning or "", time.perf_counter() - t0)
 
 
 def _resource_path(*parts):
@@ -521,6 +564,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.plot_data = []
         self.current_files = []
         self.lazy_entries = []
+        self.lazy_load_queue = []
+        self.lazy_loader_threads = {}
+        self.lazy_loader_workers = {}
+        self.lazy_generation = 0
+        self.lazy_max_workers = max(1, os.cpu_count() or 1)
+        self.lazy_warning_backlog = []
 
         self._build_ui()
         self._connect()
@@ -853,6 +902,9 @@ class MainWindow(QtWidgets.QMainWindow):
             if not filenames:
                 return None
             if self.lazy_entries:
+                self.lazy_generation += 1
+                self.lazy_load_queue = []
+                self.lazy_warning_backlog = []
                 self.lazy_entries = []
             if not add:
                 self.tab_list.clean()
@@ -894,6 +946,9 @@ class MainWindow(QtWidgets.QMainWindow):
             return None
 
     def set_lazy_file_index(self, matches):
+        self.lazy_generation += 1
+        self.lazy_load_queue = []
+        self.lazy_warning_backlog = []
         self.tab_list.clean()
         self.current_files = [path for path, _ in matches]
         self.lazy_entries = []
@@ -916,6 +971,8 @@ class MainWindow(QtWidgets.QMainWindow):
     def lazy_item_text(self, entry):
         if entry.loaded:
             state = "loaded"
+        elif entry.loading:
+            state = "loading"
         elif entry.attempted:
             state = "failed"
         else:
@@ -932,28 +989,91 @@ class MainWindow(QtWidgets.QMainWindow):
             if entry.warning and show_warning:
                 QtWidgets.QMessageBox.warning(self, "Load warning", entry.warning)
             return []
+        self.queue_lazy_load(lazy_index)
+        return []
 
-        t0 = time.perf_counter()
+    def queue_lazy_load(self, lazy_index):
+        entry = self.lazy_entries[lazy_index]
+        if entry.loaded or entry.loading or entry.attempted or lazy_index in self.lazy_load_queue:
+            return
+        entry.loading = True
+        self.lazy_load_queue.append(lazy_index)
+        self.status_label.setText("Loading {}".format(entry.basename))
+        self.statusBar().showMessage("Queued {}".format(entry.path))
+        self.update_lazy_item(lazy_index)
+        self.start_next_lazy_load()
+
+    def start_next_lazy_load(self):
+        while len(self.lazy_loader_threads) < self.lazy_max_workers and self.lazy_load_queue:
+            self.start_one_lazy_load()
+
+    def start_one_lazy_load(self):
+        if not self.lazy_load_queue:
+            return
+        lazy_index = self.lazy_load_queue.pop(0)
+        if lazy_index >= len(self.lazy_entries):
+            self.start_next_lazy_load()
+            return
+        entry = self.lazy_entries[lazy_index]
         self.status_label.setText("Loading {}".format(entry.basename))
         self.statusBar().showMessage("Loading {}".format(entry.path))
-        QtWidgets.QApplication.processEvents()
+
+        generation = self.lazy_generation
+        thread = QtCore.QThread(self)
+        worker = LazyLoadWorker(generation, lazy_index, entry.path, entry.file_format, self.tab_list.options)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.finished.connect(self.on_lazy_load_finished)
+        worker.finished.connect(thread.quit)
+        worker.finished.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        thread.finished.connect(lambda idx=lazy_index: self.on_lazy_thread_finished(idx))
+        self.lazy_loader_threads[lazy_index] = thread
+        self.lazy_loader_workers[lazy_index] = worker
+        thread.start()
+
+    def on_lazy_load_finished(self, generation, lazy_index, tabs, warning, elapsed):
+        if generation != self.lazy_generation:
+            return
+        if lazy_index >= len(self.lazy_entries):
+            return
+        entry = self.lazy_entries[lazy_index]
         start = len(self.tab_list)
-        tabs, warning = self.tab_list._load_file_tabs(entry.path, fileformat=entry.file_format, bReload=False)
         if tabs:
             self.tab_list.append(tabs)
             entry.table_indices = list(range(start, start + len(tabs)))
         entry.warning = warning or ""
         entry.attempted = True
+        entry.loading = False
         self.update_lazy_item(lazy_index)
         self.current_files = sorted(set(self.current_files + self.tab_list.filenames))
-        elapsed = time.perf_counter() - t0
         self.status_label.setText(
-            "{:,} files indexed, {:,} loaded".format(len(self.lazy_entries), self.lazy_loaded_count())
+            "{:,} files indexed, {:,} loaded, {:,} active".format(
+                len(self.lazy_entries), self.lazy_loaded_count(), len(self.lazy_loader_threads)
+            )
         )
         self.statusBar().showMessage("Loaded {} in {:.3f}s".format(entry.basename, elapsed), 8000)
-        if entry.warning and show_warning:
-            QtWidgets.QMessageBox.warning(self, "Load warning", entry.warning)
-        return entry.table_indices
+        if entry.warning:
+            self.lazy_warning_backlog.append(entry.warning)
+        if self.is_lazy_selected(lazy_index):
+            self.on_table_selection_changed()
+
+    def on_lazy_thread_finished(self, lazy_index):
+        self.lazy_loader_threads.pop(lazy_index, None)
+        self.lazy_loader_workers.pop(lazy_index, None)
+        self.status_label.setText(
+            "{:,} files indexed, {:,} loaded, {:,} active".format(
+                len(self.lazy_entries), self.lazy_loaded_count(), len(self.lazy_loader_threads)
+            )
+        )
+        self.start_next_lazy_load()
+
+    def is_lazy_selected(self, lazy_index):
+        for item in self.table_list_widget.selectedItems():
+            data = item.data(QtCore.Qt.UserRole)
+            if isinstance(data, tuple) and data == ("lazy", lazy_index):
+                return True
+        return False
 
     def update_lazy_item(self, lazy_index):
         for row in range(self.table_list_widget.count()):
@@ -967,17 +1087,9 @@ class MainWindow(QtWidgets.QMainWindow):
         lazy_indices = self.selected_lazy_indices()
         if not lazy_indices:
             return
-        warnings = []
         for i, lazy_index in enumerate(lazy_indices):
-            self.statusBar().showMessage("Loading selected file {}/{}".format(i + 1, len(lazy_indices)))
+            self.statusBar().showMessage("Queueing selected file {}/{}".format(i + 1, len(lazy_indices)))
             self.ensure_lazy_loaded(lazy_index, show_warning=False)
-            if self.lazy_entries[lazy_index].warning:
-                warnings.append(self.lazy_entries[lazy_index].warning)
-        if warnings:
-            shown = "\n\n".join(warnings[:5])
-            if len(warnings) > 5:
-                shown += "\n\n... {} more warnings".format(len(warnings) - 5)
-            QtWidgets.QMessageBox.warning(self, "Load warnings", shown)
         self.on_table_selection_changed()
 
     def load_dfs(self, dataframes, names=None):
@@ -987,6 +1099,9 @@ class MainWindow(QtWidgets.QMainWindow):
             names = ["df{}".format(i + 1) for i in range(len(dataframes))]
         if not isinstance(names, list):
             names = [names]
+        self.lazy_generation += 1
+        self.lazy_load_queue = []
+        self.lazy_warning_backlog = []
         self.lazy_entries = []
         self.tab_list.from_dataframes(dataframes=dataframes, names=names, bAdd=False)
         self.populate_tables()
@@ -994,10 +1109,14 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def reload_files(self):
         if self.lazy_entries:
+            self.lazy_generation += 1
+            self.lazy_load_queue = []
+            self.lazy_warning_backlog = []
             for entry in self.lazy_entries:
                 entry.table_indices = []
                 entry.warning = ""
                 entry.attempted = False
+                entry.loading = False
             self.tab_list.clean()
             self.populate_tables()
             self.clear()

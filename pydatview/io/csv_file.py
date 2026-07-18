@@ -1,5 +1,9 @@
 import os
 import pandas as pd
+try:
+    import polars as pl
+except ImportError:
+    pl = None
 
 try:
     from .file import File, WrongFormatError
@@ -251,12 +255,11 @@ class CSVFile(File):
         skiprows =list(sorted(set(skiprows)))
         if self.sep is not None:
             if self.sep=='\t':
-                self.sep=r'\s+'
+                self.sep='\t'
         #print(skiprows)
         try:
 #             self.data = pd.read_csv(self.filename,sep=self.sep,skiprows=skiprows,header=None,comment=self.commentChar,encoding=self.encoding)
-            with open(self.filename,'r',encoding=self.encoding) as f:
-                self.data = pd.read_csv(f,sep=self.sep,skiprows=skiprows,header=None,comment=self.commentChar)
+            self.data = self._read_data(skiprows)
         except pd.errors.ParserError as e:
             raise WrongFormatError('CSV File {}: '.format(self.filename)+e.args[0])
 
@@ -264,6 +267,38 @@ class CSVFile(File):
             self.colNames=['C{}'.format(i) for i in range(len(self.data.columns))]
         self.data.columns = self.colNames;
         self.data.rename(columns=lambda x: x.strip(),inplace=True)
+
+    def _read_data(self, skiprows):
+        if self._can_use_polars(skiprows):
+            try:
+                return self._read_data_polars(skiprows)
+            except Exception:
+                pass
+        with open(self.filename,'r',encoding=self.encoding) as f:
+            return pd.read_csv(f, sep=self.sep, skiprows=skiprows, header=None, comment=self.commentChar)
+
+    def _can_use_polars(self, skiprows):
+        if pl is None:
+            return False
+        if self.sep in (None, r'\s+', ''):
+            return False
+        return skiprows == list(range(len(skiprows)))
+
+    def _read_data_polars(self, skiprows):
+        kwargs = {
+            'separator': self.sep,
+            'has_header': False,
+            'skip_rows': len(skiprows),
+        }
+        if self.commentChar:
+            kwargs['comment_prefix'] = self.commentChar
+        try:
+            df = pl.read_csv(self.filename, **kwargs)
+        except TypeError:
+            if 'comment_prefix' in kwargs:
+                kwargs.pop('comment_prefix')
+            df = pl.read_csv(self.filename, **kwargs)
+        return df.to_pandas()
 
     def _write(self):
         # --- Safety
@@ -346,4 +381,3 @@ if __name__ == '__main__':
     print(f)
     ds = f.to2DFields()
     print(ds)
-

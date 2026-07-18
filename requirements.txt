@@ -1,6 +1,7 @@
 openpyxl
 numpy
 pandas
+polars
 xarray
 pyarrow # for parquet files
 matplotlib 
