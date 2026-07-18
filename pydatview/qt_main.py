@@ -61,6 +61,8 @@ class LazyFileEntry:
     warning: str = ""
     attempted: bool = False
     loading: bool = False
+    columns: list = field(default_factory=list)
+    header_attempted: bool = False
 
     @property
     def loaded(self):
@@ -72,7 +74,7 @@ class LazyFileEntry:
 
 
 class LazyLoadWorker(QtCore.QObject):
-    finished = QtCore.Signal(int, int, object, str, float)
+    finished = QtCore.Signal(int, int, object, str, float, str)
 
     def __init__(self, generation, lazy_index, path, file_format, options):
         super().__init__()
@@ -93,11 +95,94 @@ class LazyLoadWorker(QtCore.QObject):
             warning = "Error: Failed to open file:\n\n {}\n\n{}: {}\n".format(
                 self.path, type(exc).__name__, exc
             )
-        self.finished.emit(self.generation, self.lazy_index, tabs, warning or "", time.perf_counter() - t0)
+        self.finished.emit(
+            self.generation,
+            self.lazy_index,
+            tabs,
+            warning or "",
+            time.perf_counter() - t0,
+            getattr(self.file_format, "name", "auto"),
+        )
 
 
 def _resource_path(*parts):
     return os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "ressources", *parts))
+
+
+def _format_columns(names, units):
+    if units is None:
+        return list(names)
+    units = [re.sub(r'[()\[\]]', '', str(u)) for u in units]
+    if len(names) != len(units):
+        return list(names)
+    return [str(n) + "_[" + str(u).replace("sec", "s") + "]" for n, u in zip(names, units)]
+
+
+def _read_fast_ascii_columns(path):
+    with open(path, encoding="ascii", errors="ignore") as f:
+        for _ in range(35):
+            line = f.readline()
+            if not line:
+                break
+            first_word = (line + " dummy").lower().split()[0]
+            if first_word in ("time", "alpha"):
+                names = line.split()
+                units = [unit[1:-1] for unit in f.readline().split()]
+                return _format_columns(names, units)
+    return []
+
+
+def _read_fast_binary_columns(path):
+    from pydatview.io.fast_output_file import (
+        FileFmtID_ChanLen_In,
+        FileFmtID_NoCompressWithoutTime,
+        FileFmtID_WithTime,
+        FileFmtID_WithoutTime,
+    )
+
+    def read(fmt, count=1):
+        return np.fromfile(fid, dtype=fmt, count=count)
+
+    with open(path, "rb") as fid:
+        file_id = int(read(np.int16)[0])
+        if file_id not in (
+            FileFmtID_WithTime,
+            FileFmtID_WithoutTime,
+            FileFmtID_NoCompressWithoutTime,
+            FileFmtID_ChanLen_In,
+        ):
+            return []
+        len_name = int(read(np.int16)[0]) if file_id == FileFmtID_ChanLen_In else 10
+        n_channels = int(read(np.int32)[0])
+        read(np.int32)
+        if file_id == FileFmtID_WithTime:
+            read(np.float64, 2)
+        else:
+            read(np.float64, 2)
+        if file_id != FileFmtID_NoCompressWithoutTime:
+            read(np.float32, n_channels * 2)
+        desc_len = int(read(np.int32)[0])
+        read(np.uint8, desc_len)
+        names = []
+        units = []
+        for _ in range(n_channels + 1):
+            raw = read(np.uint8, len_name)
+            names.append(bytes(raw).decode("ascii", errors="ignore").strip())
+        for _ in range(n_channels + 1):
+            raw = read(np.uint8, len_name)
+            units.append(bytes(raw).decode("ascii", errors="ignore").strip()[1:-1])
+    return _format_columns(names, units)
+
+
+def read_lazy_columns(path, file_format):
+    if getattr(file_format, "name", "") != "FAST output file":
+        return []
+    ext = os.path.splitext(path.lower())[1]
+    if ext == ".outb":
+        return _read_fast_binary_columns(path)
+    if ext in (".out", ".elev", ".dbg", ".dbg2"):
+        return _read_fast_ascii_columns(path)
+    return []
 
 
 def _format_specs(file_format):
@@ -283,7 +368,7 @@ class NumericAxisItem(pg.AxisItem):
 
 
 class DataFrameModel(QtCore.QAbstractTableModel):
-    def __init__(self, dataframe=None, max_rows=5000):
+    def __init__(self, dataframe=None, max_rows=200):
         super().__init__()
         self.max_rows = max_rows
         self.dataframe = dataframe
@@ -570,6 +655,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.lazy_generation = 0
         self.lazy_max_workers = max(1, os.cpu_count() or 1)
         self.lazy_warning_backlog = []
+        self.plot_after_lazy_load = False
 
         self._build_ui()
         self._connect()
@@ -981,6 +1067,16 @@ class MainWindow(QtWidgets.QMainWindow):
         fmt_name = getattr(entry.file_format, "name", "auto")
         return "{}  [{} | {:.2f} MB | {}]".format(entry.basename, state, size_mb, fmt_name)
 
+    def ensure_lazy_header(self, lazy_index):
+        entry = self.lazy_entries[lazy_index]
+        if entry.columns or entry.header_attempted or entry.loaded:
+            return
+        entry.header_attempted = True
+        try:
+            entry.columns = read_lazy_columns(entry.path, entry.file_format)
+        except Exception as exc:
+            entry.warning = "Header read failed: {}: {}".format(type(exc).__name__, exc)
+
     def ensure_lazy_loaded(self, lazy_index, show_warning=True):
         entry = self.lazy_entries[lazy_index]
         if entry.loaded:
@@ -1032,7 +1128,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.lazy_loader_workers[lazy_index] = worker
         thread.start()
 
-    def on_lazy_load_finished(self, generation, lazy_index, tabs, warning, elapsed):
+    def on_lazy_load_finished(self, generation, lazy_index, tabs, warning, elapsed, format_name):
         if generation != self.lazy_generation:
             return
         if lazy_index >= len(self.lazy_entries):
@@ -1052,11 +1148,21 @@ class MainWindow(QtWidgets.QMainWindow):
                 len(self.lazy_entries), self.lazy_loaded_count(), len(self.lazy_loader_threads)
             )
         )
-        self.statusBar().showMessage("Loaded {} in {:.3f}s".format(entry.basename, elapsed), 8000)
+        n_rows = sum(getattr(tab, "nRows", 0) for tab in tabs) if tabs else 0
+        n_cols = sum(getattr(tab, "nCols", 0) for tab in tabs) if tabs else 0
+        self.statusBar().showMessage(
+            "Loaded {} in {:.3f}s ({}, {:,} rows, {:,} cols)".format(
+                entry.basename, elapsed, format_name, n_rows, n_cols
+            ),
+            12000,
+        )
         if entry.warning:
             self.lazy_warning_backlog.append(entry.warning)
         if self.is_lazy_selected(lazy_index):
             self.on_table_selection_changed()
+        if self.plot_after_lazy_load and not self.has_unloaded_lazy_selection():
+            self.plot_after_lazy_load = False
+            self.redraw()
 
     def on_lazy_thread_finished(self, lazy_index):
         self.lazy_loader_threads.pop(lazy_index, None)
@@ -1117,6 +1223,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 entry.warning = ""
                 entry.attempted = False
                 entry.loading = False
+                entry.columns = []
+                entry.header_attempted = False
             self.tab_list.clean()
             self.populate_tables()
             self.clear()
@@ -1161,8 +1269,12 @@ class MainWindow(QtWidgets.QMainWindow):
             data = item.data(QtCore.Qt.UserRole)
             if isinstance(data, tuple) and data[0] == "table":
                 indices.append(data[1])
-            elif isinstance(data, tuple) and data[0] == "lazy" and load:
-                indices.extend(self.ensure_lazy_loaded(data[1], show_warning=show_warning))
+            elif isinstance(data, tuple) and data[0] == "lazy":
+                entry = self.lazy_entries[data[1]]
+                if entry.loaded:
+                    indices.extend(entry.table_indices)
+                elif load:
+                    indices.extend(self.ensure_lazy_loaded(data[1], show_warning=show_warning))
         return indices
 
     def on_table_selection_changed(self):
@@ -1174,11 +1286,22 @@ class MainWindow(QtWidgets.QMainWindow):
     def populate_columns(self):
         previous_x = self.x_combo.currentData()
         previous_y = set(self.selected_y_indices_original())
-        indices = self.selected_table_indices()
+        lazy_indices = self.selected_lazy_indices()
+        indices = []
+        columns = []
+        if lazy_indices:
+            lazy_index = lazy_indices[0]
+            entry = self.lazy_entries[lazy_index]
+            if entry.loaded:
+                indices = list(entry.table_indices)
+            else:
+                self.ensure_lazy_header(lazy_index)
+                columns = list(entry.columns)
+        if not lazy_indices:
+            indices = self.selected_table_indices(load=False)
         if not indices and len(self.tab_list) > 0 and not self.lazy_entries:
             indices = [0]
-        columns = []
-        if indices:
+        if indices and not columns:
             columns = list(self.tab_list[indices[0]].columns)
         text_filter = self.column_filter.text().strip().lower()
         visible = [(i, str(col)) for i, col in enumerate(columns)
@@ -1209,8 +1332,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self.y_list_widget.blockSignals(False)
 
     def on_selection_changed(self):
-        if self.live_plot.isChecked():
+        if self.live_plot.isChecked() and not self.has_unloaded_lazy_selection():
             self.redraw()
+
+    def has_unloaded_lazy_selection(self):
+        for lazy_index in self.selected_lazy_indices():
+            if not self.lazy_entries[lazy_index].loaded:
+                return True
+        return False
 
     def select_all_y(self):
         self.y_list_widget.blockSignals(True)
@@ -1269,6 +1398,11 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def redraw(self):
         try:
+            if self.has_unloaded_lazy_selection():
+                self.plot_after_lazy_load = True
+                self.selected_table_indices(load=True)
+                self.statusBar().showMessage("Loading selected files before plotting ...", 8000)
+                return
             self.plot_data = self.build_plot_data()
             self.canvas.plot_data(
                 self.plot_data,
@@ -1306,12 +1440,11 @@ class MainWindow(QtWidgets.QMainWindow):
         }.get(self.marker_combo.currentText(), None)
 
     def update_table_preview(self):
-        indices = self.selected_table_indices()
+        indices = self.selected_table_indices(load=False)
         if not indices:
             self.table_model.set_dataframe(None)
             return
         self.table_model.set_dataframe(self.tab_list[indices[0]].data)
-        self.table_view.resizeColumnsToContents()
 
     def update_file_info(self):
         lazy_indices = self.selected_lazy_indices()
@@ -1321,6 +1454,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 entry = self.lazy_entries[lazy_index]
                 if entry.loaded:
                     status = "loaded"
+                elif entry.loading:
+                    status = "loading"
                 elif entry.attempted:
                     status = "failed"
                 else:
