@@ -8,6 +8,7 @@ setup(
     author='Emmanuel Branlard',
     author_email='lastname@gmail.com',
     license='MIT',
+    python_requires='>=3.9',
     packages=['pydatview'],
     install_requires=[
         'openpyxl',

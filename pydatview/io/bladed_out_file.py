@@ -206,9 +206,11 @@ def read_bladed_output(sensorFilename, readTimeFilesOnly=False):
                 sensorInfo['nMajor'] = nMajorRust
                 if sensorInfo['NDIMENS'] == 3:
                     sensorInfo['ChannelName'], sensorInfo['ChannelUnit'] = organize_bladed_3d_columns(**sensorInfo)
+                print('[pyDatView] Bladed binary load: Rust ({})'.format(dataFilename))
                 return data, sensorInfo
-            except Exception:
-                pass
+            except Exception as e:
+                print('[pyDatView] Bladed binary Rust load failed, falling back to Python/NumPy ({}): {}'.format(dataFilename, e))
+        print('[pyDatView] Bladed binary load: Python/NumPy ({})'.format(dataFilename))
 
         with open(os.path.join(dataFilename), 'rb') as fid_2:
             data = np.fromfile(fid_2, sensorInfo['Precision'])

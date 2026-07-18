@@ -174,7 +174,7 @@ Scaling all plots between 0 and 1 (by selecting `MinMax`)
 ## Installation
 
 ### Modern Qt/PyQtGraph install with Rust fast I/O
-The current GUI uses `PySide6` and `pyqtgraph` for faster plotting and large overlays. Use a recent conda environment and install the Python dependencies from `requirements.txt`:
+The current GUI uses `PySide6` and `pyqtgraph` for faster plotting and large overlays. Python 3.9 or newer is supported; the commands below use your `env314` environment with Python 3.13:
 
 ```bash
 conda create -n env314 -c conda-forge python=3.13 pip numpy pandas polars pyarrow pyside6 pyqtgraph openpyxl xarray matplotlib chardet scipy

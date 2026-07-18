@@ -453,9 +453,12 @@ def load_binary_output(filename, use_buffer=False, method='mix', use_rust=True, 
     """
     if use_rust and pydatview_fastio is not None and not use_buffer:
         try:
-            return pydatview_fastio.read_fast_outb(filename)
-        except Exception:
-            pass
+            data, info = pydatview_fastio.read_fast_outb(filename)
+            print('[pyDatView] OpenFAST binary load: Rust ({})'.format(filename))
+            return data, info
+        except Exception as e:
+            print('[pyDatView] OpenFAST binary Rust load failed, falling back to Python/NumPy ({}): {}'.format(filename, e))
+    print('[pyDatView] OpenFAST binary load: Python/NumPy ({})'.format(filename))
 
     StructDict = {
             'uint8':   ('B', 1, np.uint8), 
@@ -851,4 +854,3 @@ if __name__ == "__main__":
     B.toOUTB(extension='.dat.outb')
     B.toParquet()
     B.toCSV()
-

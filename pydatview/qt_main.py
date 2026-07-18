@@ -351,6 +351,10 @@ def _curve_pen(idx, width=1.25):
     return pg.mkPen(color=pg.intColor(idx, hues=12, values=1, maxValue=220), width=width)
 
 
+def _selected_curve_pen(width=1.25):
+    return pg.mkPen(color=(245, 158, 11), width=max(width + 2.0, 3.0))
+
+
 class NumericAxisItem(pg.AxisItem):
     def tickStrings(self, values, scale, spacing):
         labels = []
@@ -533,15 +537,21 @@ class ScanDialog(QtWidgets.QDialog):
 
 
 class QtPlotCanvas(pg.GraphicsLayoutWidget):
+    curveSelected = QtCore.Signal(object)
+
     def __init__(self, parent=None):
         super().__init__(parent=parent)
         pg.setConfigOptions(useOpenGL=True, antialias=False, background="w", foreground="k")
         self.setBackground("w")
         self._plots = []
+        self._curve_items = []
+        self._selected_curve = None
 
     def clear_plot(self):
         self.clear()
         self._plots = []
+        self._curve_items = []
+        self._selected_curve = None
 
     def plot_data(self, plot_data, *, subplots=False, sharex=True, grid=True,
                   logx=False, logy=False, show_legend=True, line_width=1.25,
@@ -599,10 +609,33 @@ class QtPlotCanvas(pg.GraphicsLayoutWidget):
                 )
                 item.setClipToView(True)
                 item.setDownsampling(auto=True, method="peak")
+                item.setCurveClickable(True, width=8)
+                base_pen = _curve_pen(curve_idx, width=line_width)
+                meta = {
+                    "label": pd.syl or pd.sy,
+                    "file": getattr(pd, "st", ""),
+                    "x": getattr(pd, "sx", ""),
+                    "y": getattr(pd, "sy", ""),
+                    "points": len(x),
+                    "line_width": line_width,
+                }
+                item.sigClicked.connect(lambda clicked_item, _ev, meta=meta: self.select_curve(clicked_item, meta))
+                self._curve_items.append((item, base_pen, meta))
                 curve_idx += 1
 
             if logx or logy:
                 plot.setLogMode(x=logx, y=logy)
+
+    def select_curve(self, selected_item, meta):
+        for item, base_pen, _ in self._curve_items:
+            item.setPen(base_pen)
+        selected_item.setPen(_selected_curve_pen(meta.get("line_width", 1.25)))
+        selected_item.setZValue(10)
+        for item, _, _ in self._curve_items:
+            if item is not selected_item:
+                item.setZValue(0)
+        self._selected_curve = selected_item
+        self.curveSelected.emit(meta)
 
     @staticmethod
     def _style_plot(plot):
@@ -687,11 +720,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.live_plot = QtWidgets.QCheckBox("Live plot")
         self.live_plot.setChecked(True)
         self.grid_check = QtWidgets.QCheckBox("Grid")
-        self.grid_check.setChecked(True)
+        self.grid_check.setChecked(False)
         self.logx_check = QtWidgets.QCheckBox("Log x")
         self.logy_check = QtWidgets.QCheckBox("Log y")
         self.legend_check = QtWidgets.QCheckBox("Legend")
-        self.legend_check.setChecked(True)
+        self.legend_check.setChecked(False)
         self.line_width_spin = QtWidgets.QDoubleSpinBox()
         self.line_width_spin.setRange(0.25, 8.0)
         self.line_width_spin.setSingleStep(0.25)
@@ -937,6 +970,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.line_width_spin.valueChanged.connect(self.on_selection_changed)
         self.marker_combo.currentIndexChanged.connect(self.on_selection_changed)
         self.column_filter.textChanged.connect(self.populate_columns)
+        self.canvas.curveSelected.connect(self.on_curve_selected)
         self.plot_button.clicked.connect(self.redraw)
         self.clear_button.clicked.connect(self.clear)
         self.select_all_y_button.clicked.connect(self.select_all_y)
@@ -1449,6 +1483,16 @@ class MainWindow(QtWidgets.QMainWindow):
             self.statusBar().showMessage("{} curves, {:,} points".format(n_curves, n_points))
         except Exception as exc:
             self.show_exception("Failed to plot data", exc)
+
+    def on_curve_selected(self, meta):
+        message = "Selected: {label} | file/table: {file} | y: {y} | x: {x} | {points:,} points".format(
+            label=meta.get("label", ""),
+            file=meta.get("file", ""),
+            y=meta.get("y", ""),
+            x=meta.get("x", ""),
+            points=meta.get("points", 0),
+        )
+        self.statusBar().showMessage(message)
 
     def clear(self):
         self.canvas.clear_plot()
