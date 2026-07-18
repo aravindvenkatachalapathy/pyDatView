@@ -10,6 +10,7 @@ import re
 import sys
 import time
 import traceback
+from dataclasses import dataclass, field
 
 import numpy as np
 
@@ -31,6 +32,25 @@ def _require_qt():
 
 
 QtCore, QtGui, QtWidgets, pg = _require_qt()
+
+
+@dataclass
+class LazyFileEntry:
+    path: str
+    file_format: object
+    size: int = 0
+    mtime: float = 0.0
+    table_indices: list = field(default_factory=list)
+    warning: str = ""
+    attempted: bool = False
+
+    @property
+    def loaded(self):
+        return len(self.table_indices) > 0
+
+    @property
+    def basename(self):
+        return os.path.basename(self.path)
 
 
 def _resource_path(*parts):
@@ -87,6 +107,47 @@ def _matches_bladed_suffix(filename, suffixes):
     return suffix in suffixes
 
 
+def _indexed_format_entries(format_entries, bladed_suffixes=None):
+    suffix_formats = {}
+    prefix_entries = []
+    regex_entries = []
+    bladed_suffixes = set(bladed_suffixes or [])
+
+    for fmt, specs in format_entries:
+        if not specs:
+            continue
+        if getattr(fmt, "name", "") == "Bladed output file" and bladed_suffixes:
+            for suffix in bladed_suffixes:
+                for prefix in (".$", ".%", "."):
+                    suffix_formats.setdefault(prefix + suffix, fmt)
+            continue
+        for kind, value in specs:
+            if kind == "suffix":
+                suffix_formats.setdefault(value, fmt)
+            elif kind == "prefix":
+                prefix_entries.append((value, fmt))
+            elif kind == "regex":
+                regex_entries.append((value, fmt))
+    return suffix_formats, prefix_entries, regex_entries
+
+
+def _match_indexed_format(filename, index):
+    ext = os.path.splitext(filename)[1].lower()
+    if not ext:
+        return None
+    suffix_formats, prefix_entries, regex_entries = index
+    fmt = suffix_formats.get(ext)
+    if fmt is not None:
+        return fmt
+    for prefix, fmt in prefix_entries:
+        if ext.startswith(prefix):
+            return fmt
+    for regex, fmt in regex_entries:
+        if regex.match(ext):
+            return fmt
+    return None
+
+
 def scan_readable_files(folder, format_specs, recursive=True):
     matches = []
     if not folder or not os.path.isdir(folder):
@@ -114,8 +175,7 @@ def scan_readable_file_matches(folder, format_entries, recursive=True, bladed_su
     matches = []
     if not folder or not os.path.isdir(folder):
         return matches
-    entries = [(fmt, specs) for fmt, specs in format_entries if specs]
-    bladed_suffixes = set(bladed_suffixes or [])
+    index = _indexed_format_entries(format_entries, bladed_suffixes=bladed_suffixes)
     stack = [folder]
     while stack:
         current = stack.pop()
@@ -129,14 +189,9 @@ def scan_readable_file_matches(folder, format_entries, recursive=True, bladed_su
                             continue
                         if not entry.is_file(follow_symlinks=False):
                             continue
-                        for fmt, specs in entries:
-                            if getattr(fmt, "name", "") == "Bladed output file" and bladed_suffixes:
-                                matched = _matches_bladed_suffix(entry.name, bladed_suffixes)
-                            else:
-                                matched = _matches_specs(entry.name, specs)
-                            if matched:
-                                matches.append((entry.path, fmt))
-                                break
+                        fmt = _match_indexed_format(entry.name, index)
+                        if fmt is not None:
+                            matches.append((entry.path, fmt))
                     except OSError:
                         continue
         except OSError:
@@ -465,6 +520,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.file_formats, self.file_format_errors = self._load_file_formats()
         self.plot_data = []
         self.current_files = []
+        self.lazy_entries = []
 
         self._build_ui()
         self._connect()
@@ -553,10 +609,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.clear_button = QtWidgets.QPushButton("Clear")
         self.select_all_y_button = QtWidgets.QPushButton("All Y")
         self.select_none_y_button = QtWidgets.QPushButton("None")
+        self.load_selected_button = QtWidgets.QPushButton("Load selected")
         button_row.addWidget(self.plot_button)
         button_row.addWidget(self.clear_button)
         button_row.addWidget(self.select_all_y_button)
         button_row.addWidget(self.select_none_y_button)
+        button_row.addWidget(self.load_selected_button)
         side_layout.addLayout(button_row)
 
         self.canvas = QtPlotCanvas()
@@ -589,6 +647,95 @@ class MainWindow(QtWidgets.QMainWindow):
         splitter.setSizes([320, 960])
 
         self.setStatusBar(QtWidgets.QStatusBar())
+        self._apply_light_borders()
+
+    def _apply_light_borders(self):
+        self.setStyleSheet("""
+            QMainWindow, QWidget {
+                background: #f6f7f9;
+                color: #1f2933;
+            }
+            QMenuBar {
+                background: #edf0f4;
+                border-bottom: 2px solid #9aa7b4;
+                spacing: 4px;
+            }
+            QMenuBar::item {
+                background: transparent;
+                padding: 5px 10px;
+                border: 1px solid transparent;
+            }
+            QMenuBar::item:selected,
+            QMenuBar::item:pressed {
+                background: #d9e2ec;
+                border: 1px solid #778899;
+            }
+            QMenu {
+                background: #ffffff;
+                border: 2px solid #778899;
+                padding: 4px;
+            }
+            QMenu::item {
+                padding: 6px 28px 6px 22px;
+                border: 1px solid transparent;
+            }
+            QMenu::item:selected {
+                background: #dbeafe;
+                border: 1px solid #4f83cc;
+            }
+            QToolBar {
+                background: #eef2f6;
+                border: 1px solid #9aa7b4;
+                border-left: 0;
+                border-right: 0;
+                spacing: 5px;
+                padding: 3px;
+            }
+            QToolButton {
+                background: #ffffff;
+                border: 1px solid #9aa7b4;
+                padding: 4px;
+            }
+            QToolButton:hover {
+                background: #e5effa;
+                border-color: #4f83cc;
+            }
+            QSplitter::handle {
+                background: #9aa7b4;
+            }
+            QListWidget, QTableView, QPlainTextEdit, QLineEdit, QComboBox, QDoubleSpinBox {
+                background: #ffffff;
+                border: 1px solid #8b9aaa;
+                selection-background-color: #2563eb;
+                selection-color: #ffffff;
+            }
+            QPushButton {
+                background: #ffffff;
+                border: 1px solid #7f8fa3;
+                padding: 4px 8px;
+            }
+            QPushButton:hover {
+                background: #e5effa;
+                border-color: #4f83cc;
+            }
+            QTabWidget::pane {
+                border: 1px solid #8b9aaa;
+                background: #ffffff;
+            }
+            QTabBar::tab {
+                background: #e7ebf0;
+                border: 1px solid #8b9aaa;
+                padding: 5px 12px;
+            }
+            QTabBar::tab:selected {
+                background: #ffffff;
+                border-bottom-color: #ffffff;
+            }
+            QStatusBar {
+                background: #edf0f4;
+                border-top: 1px solid #9aa7b4;
+            }
+        """)
 
     def _build_actions(self):
         file_menu = self.menuBar().addMenu("&File")
@@ -638,6 +785,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.clear_button.clicked.connect(self.clear)
         self.select_all_y_button.clicked.connect(self.select_all_y)
         self.select_none_y_button.clicked.connect(self.select_none_y)
+        self.load_selected_button.clicked.connect(self.load_selected_lazy_files)
 
     def _show_file_format_errors(self):
         for err in self.file_format_errors:
@@ -686,24 +834,11 @@ class MainWindow(QtWidgets.QMainWindow):
             self.statusBar().showMessage("Scan found no files in {:.3f}s".format(scan_seconds), 8000)
             return
 
+        self.set_lazy_file_index(matches)
         self.statusBar().showMessage(
-            "Scan found {:,} files in {:.3f}s; loading ...".format(len(matches), scan_seconds)
+            "Indexed {:,} files in {:.3f}s; loaded 0".format(len(matches), scan_seconds),
+            12000,
         )
-        filenames = [path for path, _ in matches]
-        fileformats = [fmt for _, fmt in matches]
-        load_seconds = self.load_files(
-            filenames,
-            add=False,
-            fileformats=fileformats,
-            status_prefix="Loading scanned files",
-        )
-        if load_seconds is not None:
-            self.statusBar().showMessage(
-                "Scanned {:,} files in {:.3f}s; loaded in {:.3f}s".format(
-                    len(filenames), scan_seconds, load_seconds
-                ),
-                12000,
-            )
 
     def load_files(self, filenames, add=False, fileformats=None, status_prefix="Loading files"):
         t0 = time.perf_counter()
@@ -717,6 +852,8 @@ class MainWindow(QtWidgets.QMainWindow):
             fileformats = [ff for _, ff in pairs]
             if not filenames:
                 return None
+            if self.lazy_entries:
+                self.lazy_entries = []
             if not add:
                 self.tab_list.clean()
                 self.current_files = []
@@ -756,6 +893,93 @@ class MainWindow(QtWidgets.QMainWindow):
             self.show_exception("Failed to load files", exc)
             return None
 
+    def set_lazy_file_index(self, matches):
+        self.tab_list.clean()
+        self.current_files = [path for path, _ in matches]
+        self.lazy_entries = []
+        for path, fmt in matches:
+            try:
+                stat = os.stat(path)
+                size = stat.st_size
+                mtime = stat.st_mtime
+            except OSError:
+                size = 0
+                mtime = 0.0
+            self.lazy_entries.append(LazyFileEntry(path=path, file_format=fmt, size=size, mtime=mtime))
+        self.populate_tables()
+        self.clear()
+        self.status_label.setText("{:,} files indexed, 0 loaded".format(len(self.lazy_entries)))
+
+    def lazy_loaded_count(self):
+        return sum(1 for entry in self.lazy_entries if entry.loaded)
+
+    def lazy_item_text(self, entry):
+        if entry.loaded:
+            state = "loaded"
+        elif entry.attempted:
+            state = "failed"
+        else:
+            state = "indexed"
+        size_mb = entry.size / (1024 * 1024) if entry.size else 0.0
+        fmt_name = getattr(entry.file_format, "name", "auto")
+        return "{}  [{} | {:.2f} MB | {}]".format(entry.basename, state, size_mb, fmt_name)
+
+    def ensure_lazy_loaded(self, lazy_index, show_warning=True):
+        entry = self.lazy_entries[lazy_index]
+        if entry.loaded:
+            return entry.table_indices
+        if entry.attempted:
+            if entry.warning and show_warning:
+                QtWidgets.QMessageBox.warning(self, "Load warning", entry.warning)
+            return []
+
+        t0 = time.perf_counter()
+        self.status_label.setText("Loading {}".format(entry.basename))
+        self.statusBar().showMessage("Loading {}".format(entry.path))
+        QtWidgets.QApplication.processEvents()
+        start = len(self.tab_list)
+        tabs, warning = self.tab_list._load_file_tabs(entry.path, fileformat=entry.file_format, bReload=False)
+        if tabs:
+            self.tab_list.append(tabs)
+            entry.table_indices = list(range(start, start + len(tabs)))
+        entry.warning = warning or ""
+        entry.attempted = True
+        self.update_lazy_item(lazy_index)
+        self.current_files = sorted(set(self.current_files + self.tab_list.filenames))
+        elapsed = time.perf_counter() - t0
+        self.status_label.setText(
+            "{:,} files indexed, {:,} loaded".format(len(self.lazy_entries), self.lazy_loaded_count())
+        )
+        self.statusBar().showMessage("Loaded {} in {:.3f}s".format(entry.basename, elapsed), 8000)
+        if entry.warning and show_warning:
+            QtWidgets.QMessageBox.warning(self, "Load warning", entry.warning)
+        return entry.table_indices
+
+    def update_lazy_item(self, lazy_index):
+        for row in range(self.table_list_widget.count()):
+            item = self.table_list_widget.item(row)
+            data = item.data(QtCore.Qt.UserRole)
+            if isinstance(data, tuple) and data == ("lazy", lazy_index):
+                item.setText(self.lazy_item_text(self.lazy_entries[lazy_index]))
+                return
+
+    def load_selected_lazy_files(self):
+        lazy_indices = self.selected_lazy_indices()
+        if not lazy_indices:
+            return
+        warnings = []
+        for i, lazy_index in enumerate(lazy_indices):
+            self.statusBar().showMessage("Loading selected file {}/{}".format(i + 1, len(lazy_indices)))
+            self.ensure_lazy_loaded(lazy_index, show_warning=False)
+            if self.lazy_entries[lazy_index].warning:
+                warnings.append(self.lazy_entries[lazy_index].warning)
+        if warnings:
+            shown = "\n\n".join(warnings[:5])
+            if len(warnings) > 5:
+                shown += "\n\n... {} more warnings".format(len(warnings) - 5)
+            QtWidgets.QMessageBox.warning(self, "Load warnings", shown)
+        self.on_table_selection_changed()
+
     def load_dfs(self, dataframes, names=None):
         if not isinstance(dataframes, list):
             dataframes = [dataframes]
@@ -763,11 +987,22 @@ class MainWindow(QtWidgets.QMainWindow):
             names = ["df{}".format(i + 1) for i in range(len(dataframes))]
         if not isinstance(names, list):
             names = [names]
+        self.lazy_entries = []
         self.tab_list.from_dataframes(dataframes=dataframes, names=names, bAdd=False)
         self.populate_tables()
         self.redraw()
 
     def reload_files(self):
+        if self.lazy_entries:
+            for entry in self.lazy_entries:
+                entry.table_indices = []
+                entry.warning = ""
+                entry.attempted = False
+            self.tab_list.clean()
+            self.populate_tables()
+            self.clear()
+            self.status_label.setText("{:,} files indexed, 0 loaded".format(len(self.lazy_entries)))
+            return
         filenames = sorted(set(f for f in self.current_files if f))
         if filenames:
             self.load_files(filenames, add=False)
@@ -775,19 +1010,41 @@ class MainWindow(QtWidgets.QMainWindow):
     def populate_tables(self):
         self.table_list_widget.blockSignals(True)
         self.table_list_widget.clear()
-        names = self.tab_list.getDisplayTabNames()
-        for i, tab in enumerate(self.tab_list):
-            item = QtWidgets.QListWidgetItem("{}  ({})".format(names[i], tab.shapestring))
-            item.setData(QtCore.Qt.UserRole, i)
-            self.table_list_widget.addItem(item)
-        if self.table_list_widget.count() > 0:
+        if self.lazy_entries:
+            for i, entry in enumerate(self.lazy_entries):
+                item = QtWidgets.QListWidgetItem(self.lazy_item_text(entry))
+                item.setData(QtCore.Qt.UserRole, ("lazy", i))
+                self.table_list_widget.addItem(item)
+        else:
+            names = self.tab_list.getDisplayTabNames()
+            for i, tab in enumerate(self.tab_list):
+                item = QtWidgets.QListWidgetItem("{}  ({})".format(names[i], tab.shapestring))
+                item.setData(QtCore.Qt.UserRole, ("table", i))
+                self.table_list_widget.addItem(item)
+        if self.table_list_widget.count() > 0 and not self.lazy_entries:
             self.table_list_widget.item(0).setSelected(True)
         self.table_list_widget.blockSignals(False)
         self.on_table_selection_changed()
 
-    def selected_table_indices(self):
+    def selected_lazy_indices(self):
         items = self.table_list_widget.selectedItems()
-        return [item.data(QtCore.Qt.UserRole) for item in items]
+        indices = []
+        for item in items:
+            data = item.data(QtCore.Qt.UserRole)
+            if isinstance(data, tuple) and data[0] == "lazy":
+                indices.append(data[1])
+        return indices
+
+    def selected_table_indices(self, load=True, show_warning=False):
+        items = self.table_list_widget.selectedItems()
+        indices = []
+        for item in items:
+            data = item.data(QtCore.Qt.UserRole)
+            if isinstance(data, tuple) and data[0] == "table":
+                indices.append(data[1])
+            elif isinstance(data, tuple) and data[0] == "lazy" and load:
+                indices.extend(self.ensure_lazy_loaded(data[1], show_warning=show_warning))
+        return indices
 
     def on_table_selection_changed(self):
         self.populate_columns()
@@ -799,7 +1056,7 @@ class MainWindow(QtWidgets.QMainWindow):
         previous_x = self.x_combo.currentData()
         previous_y = set(self.selected_y_indices_original())
         indices = self.selected_table_indices()
-        if not indices and len(self.tab_list) > 0:
+        if not indices and len(self.tab_list) > 0 and not self.lazy_entries:
             indices = [0]
         columns = []
         if indices:
@@ -938,7 +1195,30 @@ class MainWindow(QtWidgets.QMainWindow):
         self.table_view.resizeColumnsToContents()
 
     def update_file_info(self):
-        indices = self.selected_table_indices()
+        lazy_indices = self.selected_lazy_indices()
+        if lazy_indices:
+            lines = []
+            for lazy_index in lazy_indices:
+                entry = self.lazy_entries[lazy_index]
+                if entry.loaded:
+                    status = "loaded"
+                elif entry.attempted:
+                    status = "failed"
+                else:
+                    status = "indexed"
+                lines.append("File: {}".format(entry.path))
+                lines.append("Format: {}".format(getattr(entry.file_format, "name", "auto")))
+                lines.append("Status: {}".format(status))
+                lines.append("Size: {:.3f} MB".format(entry.size / (1024 * 1024) if entry.size else 0.0))
+                if entry.mtime:
+                    lines.append("Modified: {}".format(time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(entry.mtime))))
+                if entry.warning:
+                    lines.append("Warning: {}".format(entry.warning.splitlines()[0]))
+                lines.append("")
+            self.info_text.setPlainText("\n".join(lines))
+            return
+
+        indices = self.selected_table_indices(load=False)
         if not indices:
             self.info_text.clear()
             return
