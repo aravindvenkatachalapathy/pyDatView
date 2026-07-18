@@ -182,7 +182,7 @@ conda activate env314
 python -m pip install -e .
 ```
 
-For faster OpenFAST binary `.outb` loading, install Rust and `maturin`, then build the optional Rust extension:
+For faster OpenFAST binary `.outb` and Bladed binary loading, install Rust and `maturin`, then build the optional Rust extension:
 
 ```bash
 conda install -n env314 -c conda-forge rust maturin
@@ -191,7 +191,7 @@ cd rust/pydatview_fastio
 maturin develop --release
 ```
 
-After this, the Python reader automatically uses the Rust extension when `pydatview_fastio` is available, and falls back to the pure Python/NumPy reader otherwise.
+After this, the Python readers automatically use the Rust extension when `pydatview_fastio` is available, and fall back to the pure Python/NumPy readers otherwise.
 
 ### Windows installation
 For Windows users, installer executables are available [here](https://github.com/ebranlard/pyDatView/releases) (look for the latest pyDatView\*.exe)

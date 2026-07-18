@@ -4,7 +4,7 @@ use numpy::{IntoPyArray, PyArray2};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
-use std::fs::File;
+use std::fs::{self, File};
 use std::io::{BufReader, Read};
 use std::path::Path;
 
@@ -206,8 +206,89 @@ fn read_fast_outb(py: Python<'_>, filename: &str) -> PyResult<(Py<PyArray2<f64>>
     Ok((data.into_pyarray(py).unbind(), info.unbind()))
 }
 
+#[pyfunction]
+fn read_bladed_binary(
+    py: Python<'_>,
+    filename: &str,
+    n_major: usize,
+    n_sections: usize,
+    n_sensors: usize,
+    n_dimens: usize,
+    is_float64: bool,
+) -> PyResult<(Py<PyArray2<f64>>, usize)> {
+    if n_dimens != 2 && n_dimens != 3 {
+        return Err(PyValueError::new_err(format!(
+            "Unsupported Bladed NDIMENS value: {}",
+            n_dimens
+        )));
+    }
+    if n_sections == 0 || n_sensors == 0 {
+        return Err(PyValueError::new_err(
+            "Bladed dimensions must include at least one section and one sensor",
+        ));
+    }
+
+    let bytes = fs::read(filename).map_err(|e| PyValueError::new_err(e.to_string()))?;
+    let value_size = if is_float64 { 8 } else { 4 };
+    let n_values = bytes.len() / value_size;
+    if n_values == 0 {
+        return Err(PyValueError::new_err("Bladed binary file contains no values"));
+    }
+
+    let values_per_step = if n_dimens == 3 {
+        n_sections
+            .checked_mul(n_sensors)
+            .ok_or_else(|| PyValueError::new_err("Bladed dimensions overflow"))?
+    } else {
+        n_sensors
+    };
+    let inferred_major = if n_major == 0 {
+        n_values / values_per_step
+    } else {
+        n_major
+    };
+    let expected_values = inferred_major
+        .checked_mul(values_per_step)
+        .ok_or_else(|| PyValueError::new_err("Bladed data size overflow"))?;
+    if n_values < expected_values {
+        return Err(PyValueError::new_err(format!(
+            "Bladed binary file is too short: {} values found, {} expected",
+            n_values, expected_values
+        )));
+    }
+
+    let n_cols = if n_dimens == 3 {
+        n_sections * n_sensors
+    } else {
+        n_sensors
+    };
+    let mut data = Array2::<f64>::zeros((inferred_major, n_cols));
+    if is_float64 {
+        for i in 0..inferred_major {
+            for j in 0..n_cols {
+                let offset = (i * values_per_step + j) * value_size;
+                let mut chunk = [0_u8; 8];
+                chunk.copy_from_slice(&bytes[offset..offset + 8]);
+                data[[i, j]] = f64::from_le_bytes(chunk);
+            }
+        }
+    } else {
+        for i in 0..inferred_major {
+            for j in 0..n_cols {
+                let offset = (i * values_per_step + j) * value_size;
+                let mut chunk = [0_u8; 4];
+                chunk.copy_from_slice(&bytes[offset..offset + 4]);
+                data[[i, j]] = f32::from_le_bytes(chunk) as f64;
+            }
+        }
+    }
+
+    Ok((data.into_pyarray(py).unbind(), inferred_major))
+}
+
 #[pymodule]
 fn pydatview_fastio(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(read_fast_outb, m)?)?;
+    m.add_function(wrap_pyfunction!(read_bladed_binary, m)?)?;
     Ok(())
 }

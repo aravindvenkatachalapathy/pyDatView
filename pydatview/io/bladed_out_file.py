@@ -5,6 +5,10 @@ import pandas as pd
 import glob
 import shlex
 try:
+    import pydatview_fastio
+except ImportError:
+    pydatview_fastio = None
+try:
     from .file import File, WrongFormatError, BrokenFormatError
 except:
     File = dict
@@ -128,30 +132,38 @@ def read_bladed_sensor_file(sensorfile):
         # if number of channel names are not matching with Sensor number then create dummy ones:
         #dat['ChannelName'] = ['Channel' + str(ss) for ss in range(dat['nSensors'])]
 
-            
     return dat
-            
+
+
+def organize_bladed_3d_columns(**info):
+    """Return flattened Bladed 3D channel names and units."""
+    names = []
+    units = []
+    for sec in info['SectionList']:
+        for chan, unit in zip(info['ChannelName'], info['ChannelUnit']):
+            try:
+                names.append(str(np.around(float(sec), 2)) + 'm-' + chan)
+            except ValueError:
+                names.append(str(sec) + '-' + chan)
+            units.append(unit)
+    return names, units
+
+
 def OrgData(data, **info):
     """ Flatten 3D field into 2D table"""
     # since some of the matrices are 3 dimensional, we want to make all 
     # to 2d matrix, so I am organizing them here:
     if info['NDIMENS'] == 3:
-        SName = []
-        SUnit = []
         dataOut = np.zeros( (info['nMajor'],len(info['SectionList'])*len(info['ChannelName'])) ) 
-        
+
         col_vec = -1
-        for isec,sec in enumerate(info['SectionList']):
-            for ichan,(chan,unit) in enumerate(zip(info['ChannelName'], info['ChannelUnit'])):
-                try:
-                    SName.append(str(np.around(float(sec),2)) + 'm-' + chan)
-                except ValueError:
-                    SName.append(str(sec) + '-' + chan)
-                SUnit.append(unit)
+        for isec, _ in enumerate(info['SectionList']):
+            for ichan, _ in enumerate(zip(info['ChannelName'], info['ChannelUnit'])):
                 col_vec +=1
                 dataOut[:,col_vec] = data[:,isec,ichan]
 
         data = dataOut
+        SName, SUnit = organize_bladed_3d_columns(**info)
         info['ChannelName'] = SName
         info['ChannelUnit'] = SUnit
     else:
@@ -179,6 +191,24 @@ def read_bladed_output(sensorFilename, readTimeFilesOnly=False):
     dataFilename = sensorFilename.replace('%','$')
 
     if isBinary(dataFilename):            # it is binary            
+
+        if pydatview_fastio is not None:
+            try:
+                data, nMajorRust = pydatview_fastio.read_bladed_binary(
+                    dataFilename,
+                    nMajor,
+                    nSections,
+                    nSensors,
+                    sensorInfo['NDIMENS'],
+                    sensorInfo['Precision'] == np.float64,
+                )
+                data = np.asarray(data)
+                sensorInfo['nMajor'] = nMajorRust
+                if sensorInfo['NDIMENS'] == 3:
+                    sensorInfo['ChannelName'], sensorInfo['ChannelUnit'] = organize_bladed_3d_columns(**sensorInfo)
+                return data, sensorInfo
+            except Exception:
+                pass
 
         with open(os.path.join(dataFilename), 'rb') as fid_2:
             data = np.fromfile(fid_2, sensorInfo['Precision'])
@@ -398,5 +428,3 @@ if __name__ == '__main__':
     #filename = r'E:\Work_Google Drive\Bladed_Sims\Bladed_out_binary.$41'
     #Output = BladedFile(filename)
     #df = Output.toDataFrame()
-
-
