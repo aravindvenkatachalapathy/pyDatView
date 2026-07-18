@@ -729,7 +729,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         side_layout.addWidget(QtWidgets.QLabel("X column"))
         self.column_filter = QtWidgets.QLineEdit()
-        self.column_filter.setPlaceholderText("Filter columns")
+        self.column_filter.setPlaceholderText("Filter Y columns")
         side_layout.addWidget(self.column_filter)
         self.x_combo = QtWidgets.QComboBox()
         side_layout.addWidget(self.x_combo)
@@ -843,6 +843,27 @@ class MainWindow(QtWidgets.QMainWindow):
                 border: 1px solid #8b9aaa;
                 selection-background-color: #2563eb;
                 selection-color: #ffffff;
+            }
+            QListWidget::item {
+                padding: 3px 5px;
+                border: 1px solid transparent;
+            }
+            QListWidget::item:selected,
+            QListWidget::item:selected:active,
+            QListWidget::item:selected:!active {
+                background: #2563eb;
+                color: #ffffff;
+                border: 1px solid #1d4ed8;
+            }
+            QListWidget::item:hover:!selected {
+                background: #e5effa;
+                border: 1px solid #9bbce8;
+            }
+            QTableView::item:selected,
+            QTableView::item:selected:active,
+            QTableView::item:selected:!active {
+                background: #2563eb;
+                color: #ffffff;
             }
             QPushButton {
                 background: #ffffff;
@@ -1303,26 +1324,33 @@ class MainWindow(QtWidgets.QMainWindow):
             indices = [0]
         if indices and not columns:
             columns = list(self.tab_list[indices[0]].columns)
+        all_columns = [(i, str(col)) for i, col in enumerate(columns)]
         text_filter = self.column_filter.text().strip().lower()
-        visible = [(i, str(col)) for i, col in enumerate(columns)
-                   if not text_filter or text_filter in str(col).lower()]
+        visible_y = [(i, col) for i, col in all_columns
+                     if not text_filter or text_filter in col.lower()]
 
         self.x_combo.blockSignals(True)
         self.y_list_widget.blockSignals(True)
         self.x_combo.clear()
         self.y_list_widget.clear()
-        for original_i, col in visible:
+        for original_i, col in all_columns:
             self.x_combo.addItem(col, original_i)
+        for original_i, col in visible_y:
             item = QtWidgets.QListWidgetItem(col)
             item.setData(QtCore.Qt.UserRole, original_i)
             self.y_list_widget.addItem(item)
 
-        if visible:
-            x_to_select = previous_x if previous_x is not None else visible[0][0]
-            x_visible = [i for i, _ in visible]
-            self.x_combo.setCurrentIndex(x_visible.index(x_to_select) if x_to_select in x_visible else 0)
-        if visible and not previous_y and len(visible) > 1:
-            self.y_list_widget.item(1).setSelected(True)
+        if all_columns:
+            all_indices = [i for i, _ in all_columns]
+            if previous_x in all_indices:
+                x_to_select = previous_x
+            else:
+                x_to_select = next((i for i, col in all_columns if col.lower().startswith("time")), all_columns[0][0])
+            self.x_combo.setCurrentIndex(all_indices.index(x_to_select))
+        if visible_y and not previous_y:
+            x_current = self.x_combo.currentData()
+            default_row = next((row for row, (i, _) in enumerate(visible_y) if i != x_current), 0)
+            self.y_list_widget.item(default_row).setSelected(True)
         else:
             for row in range(self.y_list_widget.count()):
                 item = self.y_list_widget.item(row)
