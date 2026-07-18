@@ -1,0 +1,13 @@
+[package]
+name = "pydatview_fastio"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "pydatview_fastio"
+crate-type = ["cdylib"]
+
+[dependencies]
+byteorder = "1.5"
+numpy = "0.27"
+pyo3 = { version = "0.27", features = ["extension-module"] }

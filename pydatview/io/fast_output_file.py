@@ -38,6 +38,10 @@ try:
     from .csv_file import CSVFile
 except:
     print('CSVFile not available')
+try:
+    import pydatview_fastio
+except ImportError:
+    pydatview_fastio = None
 
 
 FileFmtID_WithTime              = 1 # File identifiers used in FAST
@@ -440,13 +444,19 @@ def load_ascii_output(filename, method='numpy', encoding='ascii', **kwargs):
     return data, info
 
 
-def load_binary_output(filename, use_buffer=False, method='mix', **kwargs):
+def load_binary_output(filename, use_buffer=False, method='mix', use_rust=True, **kwargs):
     """
     03/09/15: Ported from ReadFASTbinary.m by Mads M Pedersen, DTU Wind
     24/10/18: Low memory/buffered version by E. Branlard, NREL
     18/01/19: New file format for extended channels, by E. Branlard, NREL
     20/11/23: Improved performances using np.fromfile, by E. Branlard, NREL
     """
+    if use_rust and pydatview_fastio is not None and not use_buffer:
+        try:
+            return pydatview_fastio.read_fast_outb(filename)
+        except Exception:
+            pass
+
     StructDict = {
             'uint8':   ('B', 1, np.uint8), 
             'int16':   ('h', 2, np.int16), 
@@ -841,5 +851,4 @@ if __name__ == "__main__":
     B.toOUTB(extension='.dat.outb')
     B.toParquet()
     B.toCSV()
-
 

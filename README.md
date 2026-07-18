@@ -173,6 +173,26 @@ Scaling all plots between 0 and 1 (by selecting `MinMax`)
 
 ## Installation
 
+### Modern Qt/PyQtGraph install with Rust fast I/O
+The current GUI uses `PySide6` and `pyqtgraph` for faster plotting and large overlays. Use a recent conda environment and install the Python dependencies from `requirements.txt`:
+
+```bash
+conda create -n env314 -c conda-forge python=3.13 pip numpy pandas polars pyarrow pyside6 pyqtgraph openpyxl xarray matplotlib chardet scipy
+conda activate env314
+python -m pip install -e .
+```
+
+For faster OpenFAST binary `.outb` loading, install Rust and `maturin`, then build the optional Rust extension:
+
+```bash
+conda install -n env314 -c conda-forge rust maturin
+conda activate env314
+cd rust/pydatview_fastio
+maturin develop --release
+```
+
+After this, the Python reader automatically uses the Rust extension when `pydatview_fastio` is available, and falls back to the pure Python/NumPy reader otherwise.
+
 ### Windows installation
 For Windows users, installer executables are available [here](https://github.com/ebranlard/pyDatView/releases) (look for the latest pyDatView\*.exe)
 
