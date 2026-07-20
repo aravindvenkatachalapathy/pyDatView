@@ -129,11 +129,6 @@ Once implemented the fileformat needs to be registered in `pydatview/io/__init__
 If you believe your fileformat will be beneficial to the wind energy community, we recommend to also add your file format to the [weio](http://github.com/ebranlard/weio/) repository.
 Follow the procedure mentioned in the README of the weio repository (in particualr adding unit tests and minimalistic example files).
 
-
-## Contributing
-Any contributions to this project are welcome! If you find this project useful, you can also buy me a coffee (donate a small amount) with the link below:
-
-
-<a href="https://www.buymeacoffee.com/hTpOQGl" target="_blank"><img src="https://www.buymeacoffee.com/assets/img/custom_images/orange_img.png" alt="Donate just a small amount, buy me a coffee" style="height: 41px !important;width: 174px" ></a>
+!important;width: 174px" ></a>
 
 <a href="https://www.buymeacoffee.com/hTpOQGl" target="_blank"><img src="https://www.buymeacoffee.com/assets/img/custom_images/orange_img.png" alt="Donate just a small amount, buy me a coffee" style="height: 41px !important;width: 174px" ></a>
