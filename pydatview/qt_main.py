@@ -17,6 +17,7 @@ import numpy as np
 from pydatview.Tables import TableList
 from pydatview.plotdata import PlotData, PDL_xlabel
 import pydatview.io as weio
+from pydatview.common import cleanCol
 
 
 def _remove_user_site_for_conda_qt():
@@ -355,6 +356,19 @@ def _selected_curve_pen(width=1.25):
     return pg.mkPen(color=(245, 158, 11), width=max(width + 2.0, 3.0))
 
 
+def _default_lazy_workers():
+    cpu_count = max(1, os.cpu_count() or 1)
+    env_value = os.environ.get("PYDATVIEW_MAX_WORKERS")
+    if env_value:
+        try:
+            return max(1, min(cpu_count, int(env_value)))
+        except ValueError:
+            print("[pyDatView] Ignoring invalid PYDATVIEW_MAX_WORKERS={!r}".format(env_value))
+    if sys.platform.startswith("win"):
+        return min(cpu_count, 8)
+    return min(cpu_count, 32)
+
+
 class NumericAxisItem(pg.AxisItem):
     def tickStrings(self, values, scale, spacing):
         labels = []
@@ -686,9 +700,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.lazy_loader_threads = {}
         self.lazy_loader_workers = {}
         self.lazy_generation = 0
-        self.lazy_max_workers = max(1, os.cpu_count() or 1)
+        self.lazy_max_workers = _default_lazy_workers()
         self.lazy_warning_backlog = []
         self.plot_after_lazy_load = False
+        self.last_plot_skipped = 0
 
         self._build_ui()
         self._connect()
@@ -717,6 +732,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.plot_type_combo.addItems(["Regular", "PDF", "FFT", "MinMax"])
         self.mode_combo = QtWidgets.QComboBox()
         self.mode_combo.addItems(["Overlay", "Subplots"])
+        self.compare_combo = QtWidgets.QComboBox()
+        self.compare_combo.addItems(["Auto", "2 files", "3 files"])
         self.live_plot = QtWidgets.QCheckBox("Live plot")
         self.live_plot.setChecked(True)
         self.grid_check = QtWidgets.QCheckBox("Grid")
@@ -731,11 +748,17 @@ class MainWindow(QtWidgets.QMainWindow):
         self.line_width_spin.setValue(1.25)
         self.marker_combo = QtWidgets.QComboBox()
         self.marker_combo.addItems(["None", "Circle", "Square", "Triangle", "Diamond"])
+        self.load_workers_combo = QtWidgets.QComboBox()
+        worker_options = ["Auto", "1", "2", "4", "8", "16", "32", "64", "96"]
+        self.load_workers_combo.addItems(worker_options)
+        self.load_workers_combo.setToolTip("Maximum parallel file load workers. Auto is capped on Windows to avoid UI hangs.")
         self.status_label = QtWidgets.QLabel("No files loaded")
         top.addWidget(QtWidgets.QLabel("Plot:"))
         top.addWidget(self.plot_type_combo)
         top.addWidget(QtWidgets.QLabel("Mode:"))
         top.addWidget(self.mode_combo)
+        top.addWidget(QtWidgets.QLabel("Compare:"))
+        top.addWidget(self.compare_combo)
         top.addWidget(self.live_plot)
         top.addWidget(self.grid_check)
         top.addWidget(self.logx_check)
@@ -745,6 +768,8 @@ class MainWindow(QtWidgets.QMainWindow):
         top.addWidget(self.line_width_spin)
         top.addWidget(QtWidgets.QLabel("Marker:"))
         top.addWidget(self.marker_combo)
+        top.addWidget(QtWidgets.QLabel("Load:"))
+        top.addWidget(self.load_workers_combo)
         top.addStretch(1)
         top.addWidget(self.status_label)
 
@@ -965,12 +990,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self.x_combo.currentIndexChanged.connect(self.on_selection_changed)
         self.y_list_widget.itemSelectionChanged.connect(self.on_selection_changed)
         self.mode_combo.currentIndexChanged.connect(self.on_selection_changed)
+        self.compare_combo.currentIndexChanged.connect(self.on_selection_changed)
         self.grid_check.stateChanged.connect(self.on_selection_changed)
         self.logx_check.stateChanged.connect(self.on_selection_changed)
         self.logy_check.stateChanged.connect(self.on_selection_changed)
         self.legend_check.stateChanged.connect(self.on_selection_changed)
         self.line_width_spin.valueChanged.connect(self.on_selection_changed)
         self.marker_combo.currentIndexChanged.connect(self.on_selection_changed)
+        self.load_workers_combo.currentIndexChanged.connect(self.update_lazy_worker_limit)
         self.column_filter.textChanged.connect(self.populate_columns)
         self.canvas.curveSelected.connect(self.on_curve_selected)
         self.plot_button.clicked.connect(self.redraw)
@@ -1159,6 +1186,15 @@ class MainWindow(QtWidgets.QMainWindow):
     def start_next_lazy_load(self):
         while len(self.lazy_loader_threads) < self.lazy_max_workers and self.lazy_load_queue:
             self.start_one_lazy_load()
+
+    def update_lazy_worker_limit(self):
+        text = self.load_workers_combo.currentText()
+        if text == "Auto":
+            self.lazy_max_workers = _default_lazy_workers()
+        else:
+            self.lazy_max_workers = max(1, min(max(1, os.cpu_count() or 1), int(text)))
+        self.statusBar().showMessage("Parallel file load workers: {}".format(self.lazy_max_workers), 8000)
+        self.start_next_lazy_load()
 
     def start_one_lazy_load(self):
         if not self.lazy_load_queue:
@@ -1425,6 +1461,33 @@ class MainWindow(QtWidgets.QMainWindow):
     def selected_y_indices_original(self):
         return [item.data(QtCore.Qt.UserRole) for item in self.y_list_widget.selectedItems()]
 
+    def compare_file_limit(self):
+        text = self.compare_combo.currentText()
+        if text.startswith("2"):
+            return 2
+        if text.startswith("3"):
+            return 3
+        return None
+
+    @staticmethod
+    def matching_column_index(tab, reference_col, prefer_time=False):
+        columns = [str(col) for col in tab.columns]
+        reference = str(reference_col)
+        if reference in columns:
+            return columns.index(reference)
+        reference_clean = cleanCol(reference)
+        for i, col in enumerate(columns):
+            if cleanCol(col) == reference_clean:
+                return i
+        if prefer_time:
+            for i, col in enumerate(columns):
+                if cleanCol(col) == "time":
+                    return i
+            for i, col in enumerate(columns):
+                if str(col).lower().startswith("time"):
+                    return i
+        return None
+
     def build_plot_data(self):
         plot_data = []
         table_indices = self.selected_table_indices()
@@ -1433,13 +1496,31 @@ class MainWindow(QtWidgets.QMainWindow):
         if ix is None or not y_indices or not table_indices:
             return plot_data
 
+        compare_limit = self.compare_file_limit()
+        if compare_limit is not None:
+            table_indices = table_indices[:compare_limit]
+        if not table_indices:
+            return plot_data
+
+        self.last_plot_skipped = 0
+        reference_tab = self.tab_list[table_indices[0]]
+        if ix >= len(reference_tab.columns):
+            return plot_data
+        x_reference = str(reference_tab.columns[ix])
+        y_references = [str(reference_tab.columns[iy]) for iy in y_indices if iy < len(reference_tab.columns)]
         same_col = len(table_indices) > 1
         for it in table_indices:
             tab = self.tab_list[it]
-            for iy in y_indices:
-                if iy >= len(tab.columns):
+            ix_tab = ix if len(table_indices) == 1 else self.matching_column_index(tab, x_reference, prefer_time=True)
+            if ix_tab is None or ix_tab >= len(tab.columns):
+                self.last_plot_skipped += len(y_references)
+                continue
+            for y_reference in y_references:
+                iy_tab = self.matching_column_index(tab, y_reference) if len(table_indices) > 1 else self.matching_column_index(tab, y_reference)
+                if iy_tab is None or iy_tab >= len(tab.columns):
+                    self.last_plot_skipped += 1
                     continue
-                idx = (it, ix, iy, str(tab.columns[ix]), str(tab.columns[iy]), tab.active_name)
+                idx = (it, ix_tab, iy_tab, str(tab.columns[ix_tab]), str(tab.columns[iy_tab]), tab.active_name)
                 pd = PlotData()
                 pd.fromIDs(self.tab_list, len(plot_data), idx, same_col, pipeline=None)
                 self.apply_plot_type(pd)
@@ -1482,7 +1563,8 @@ class MainWindow(QtWidgets.QMainWindow):
             n_curves = len(self.plot_data)
             n_points = sum(len(pd.y) for pd in self.plot_data)
             self.update_stats()
-            self.statusBar().showMessage("{} curves, {:,} points".format(n_curves, n_points))
+            skipped = " ({} missing variable match skipped)".format(self.last_plot_skipped) if self.last_plot_skipped else ""
+            self.statusBar().showMessage("{} curves, {:,} points{}".format(n_curves, n_points, skipped))
         except Exception as exc:
             self.show_exception("Failed to plot data", exc)
 
