@@ -353,6 +353,8 @@ def _finite_xy(x, y):
         x = x[:n]
         y = y[:n]
     finite = np.isfinite(x) & np.isfinite(y)
+    if finite.all():
+        return x, y
     return x[finite], y[finite]
 
 
@@ -636,6 +638,9 @@ class QtPlotCanvas(pg.GraphicsLayoutWidget):
                 meta = {
                     "label": pd.syl or pd.sy,
                     "file": getattr(pd, "st", ""),
+                    "filename": getattr(pd, "filename", ""),
+                    "table_index": getattr(pd, "it", None),
+                    "pane_index": getattr(pd, "pane_index", 0),
                     "x": getattr(pd, "sx", ""),
                     "y": getattr(pd, "sy", ""),
                     "points": len(x),
@@ -734,10 +739,16 @@ class MainWindow(QtWidgets.QMainWindow):
         central = QtWidgets.QWidget()
         self.setCentralWidget(central)
         root = QtWidgets.QVBoxLayout(central)
-        root.setContentsMargins(6, 6, 6, 6)
+        root.setContentsMargins(8, 8, 8, 8)
+        root.setSpacing(8)
 
-        top = QtWidgets.QHBoxLayout()
-        root.addLayout(top)
+        controls_panel = QtWidgets.QFrame()
+        controls_panel.setObjectName("plotControls")
+        top = QtWidgets.QGridLayout(controls_panel)
+        top.setContentsMargins(10, 8, 10, 8)
+        top.setHorizontalSpacing(8)
+        top.setVerticalSpacing(7)
+        root.addWidget(controls_panel)
         self.plot_type_combo = QtWidgets.QComboBox()
         self.plot_type_combo.addItems(["Regular", "PDF", "FFT", "MinMax"])
         self.mode_combo = QtWidgets.QComboBox()
@@ -768,26 +779,33 @@ class MainWindow(QtWidgets.QMainWindow):
         self.loading_progress.setMaximumWidth(180)
         self.loading_progress.setVisible(False)
         self.status_label = QtWidgets.QLabel("No files loaded")
-        top.addWidget(QtWidgets.QLabel("Plot:"))
-        top.addWidget(self.plot_type_combo)
-        top.addWidget(QtWidgets.QLabel("Mode:"))
-        top.addWidget(self.mode_combo)
-        top.addWidget(QtWidgets.QLabel("Compare:"))
-        top.addWidget(self.compare_combo)
-        top.addWidget(self.live_plot)
-        top.addWidget(self.grid_check)
-        top.addWidget(self.logx_check)
-        top.addWidget(self.logy_check)
-        top.addWidget(self.legend_check)
-        top.addWidget(QtWidgets.QLabel("LW:"))
-        top.addWidget(self.line_width_spin)
-        top.addWidget(QtWidgets.QLabel("Marker:"))
-        top.addWidget(self.marker_combo)
-        top.addWidget(QtWidgets.QLabel("Load:"))
-        top.addWidget(self.load_workers_combo)
-        top.addWidget(self.loading_progress)
-        top.addStretch(1)
-        top.addWidget(self.status_label)
+        self.status_label.setObjectName("statusChip")
+
+        top.addWidget(QtWidgets.QLabel("Plot"), 0, 0)
+        top.addWidget(self.plot_type_combo, 0, 1)
+        top.addWidget(QtWidgets.QLabel("Layout"), 0, 2)
+        top.addWidget(self.mode_combo, 0, 3)
+        top.addWidget(QtWidgets.QLabel("Compare"), 0, 4)
+        top.addWidget(self.compare_combo, 0, 5)
+        top.addWidget(self.live_plot, 0, 6)
+        top.setColumnStretch(9, 1)
+        top.addWidget(self.status_label, 0, 10, QtCore.Qt.AlignRight)
+
+        top.addWidget(self.grid_check, 1, 0)
+        top.addWidget(self.logx_check, 1, 1)
+        top.addWidget(self.logy_check, 1, 2)
+        top.addWidget(self.legend_check, 1, 3)
+        top.addWidget(QtWidgets.QLabel("Line width"), 1, 4)
+        top.addWidget(self.line_width_spin, 1, 5)
+        top.addWidget(QtWidgets.QLabel("Marker"), 1, 6)
+        top.addWidget(self.marker_combo, 1, 7)
+        load_controls = QtWidgets.QHBoxLayout()
+        load_controls.setContentsMargins(0, 0, 0, 0)
+        load_controls.setSpacing(6)
+        load_controls.addWidget(QtWidgets.QLabel("Workers"))
+        load_controls.addWidget(self.load_workers_combo)
+        load_controls.addWidget(self.loading_progress)
+        top.addLayout(load_controls, 1, 10)
 
         splitter = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
         root.addWidget(splitter, 1)
@@ -802,10 +820,13 @@ class MainWindow(QtWidgets.QMainWindow):
 
         button_row = QtWidgets.QHBoxLayout()
         self.plot_button = QtWidgets.QPushButton("Plot")
+        self.plot_button.setObjectName("primaryButton")
+        self.plot_button.setIcon(QtGui.QIcon(_resource_path("icons", "chart.svg")))
         self.clear_button = QtWidgets.QPushButton("Clear")
         self.select_all_y_button = QtWidgets.QPushButton("All Y")
         self.select_none_y_button = QtWidgets.QPushButton("None")
         self.load_selected_button = QtWidgets.QPushButton("Load selected")
+        self.load_selected_button.setToolTip("Parse the selected indexed files and cache them in memory")
         button_row.addWidget(self.plot_button)
         button_row.addWidget(self.clear_button)
         button_row.addWidget(self.select_all_y_button)
@@ -847,19 +868,28 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def create_selector_pane(self, index):
         frame = QtWidgets.QGroupBox("Set {}".format(index + 1))
+        frame.setProperty("selectorPane", True)
         layout = QtWidgets.QVBoxLayout(frame)
-        layout.setContentsMargins(6, 6, 6, 6)
-        layout.addWidget(QtWidgets.QLabel("Tables"))
+        layout.setContentsMargins(8, 10, 8, 8)
+        layout.setSpacing(6)
+        tables_label = QtWidgets.QLabel("TABLES")
+        tables_label.setProperty("sectionLabel", True)
+        layout.addWidget(tables_label)
         table_list_widget = QtWidgets.QListWidget()
         table_list_widget.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
         layout.addWidget(table_list_widget, 2)
-        layout.addWidget(QtWidgets.QLabel("X column"))
+        x_label = QtWidgets.QLabel("X COLUMN")
+        x_label.setProperty("sectionLabel", True)
+        layout.addWidget(x_label)
         column_filter = QtWidgets.QLineEdit()
         column_filter.setPlaceholderText("Filter Y columns")
+        column_filter.setClearButtonEnabled(True)
         layout.addWidget(column_filter)
         x_combo = QtWidgets.QComboBox()
         layout.addWidget(x_combo)
-        layout.addWidget(QtWidgets.QLabel("Y columns"))
+        y_label = QtWidgets.QLabel("Y COLUMNS")
+        y_label.setProperty("sectionLabel", True)
+        layout.addWidget(y_label)
         y_list_widget = QtWidgets.QListWidget()
         y_list_widget.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
         layout.addWidget(y_list_widget, 3)
@@ -901,27 +931,45 @@ class MainWindow(QtWidgets.QMainWindow):
     def _apply_light_borders(self):
         self.setStyleSheet("""
             QMainWindow, QWidget {
-                background: #f6f7f9;
-                color: #1f2933;
+                background: #f4f6f8;
+                color: #17212b;
+            }
+            QFrame#plotControls {
+                background: #ffffff;
+                border: 1px solid #8c99a6;
+                border-radius: 6px;
+            }
+            QLabel[sectionLabel="true"] {
+                color: #536273;
+                font-size: 10px;
+                font-weight: 700;
+            }
+            QLabel#statusChip {
+                background: #eaf2ff;
+                color: #174ea6;
+                border: 1px solid #9bbcf1;
+                border-radius: 4px;
+                padding: 4px 8px;
             }
             QMenuBar {
-                background: #edf0f4;
-                border-bottom: 2px solid #9aa7b4;
+                background: #ffffff;
+                border-bottom: 1px solid #8794a2;
                 spacing: 4px;
             }
             QMenuBar::item {
                 background: transparent;
-                padding: 5px 10px;
+                padding: 6px 10px;
                 border: 1px solid transparent;
+                border-radius: 3px;
             }
             QMenuBar::item:selected,
             QMenuBar::item:pressed {
-                background: #d9e2ec;
-                border: 1px solid #778899;
+                background: #e7f0ff;
+                border: 1px solid #729bd3;
             }
             QMenu {
                 background: #ffffff;
-                border: 2px solid #778899;
+                border: 1px solid #657585;
                 padding: 4px;
             }
             QMenu::item {
@@ -933,33 +981,69 @@ class MainWindow(QtWidgets.QMainWindow):
                 border: 1px solid #4f83cc;
             }
             QToolBar {
-                background: #eef2f6;
-                border: 1px solid #9aa7b4;
+                background: #f7f9fb;
+                border: 1px solid #8794a2;
                 border-left: 0;
                 border-right: 0;
                 spacing: 5px;
-                padding: 3px;
+                padding: 4px 7px;
             }
             QToolButton {
                 background: #ffffff;
-                border: 1px solid #9aa7b4;
-                padding: 4px;
+                border: 1px solid #8c99a6;
+                border-radius: 4px;
+                padding: 5px;
             }
             QToolButton:hover {
-                background: #e5effa;
-                border-color: #4f83cc;
+                background: #eaf2ff;
+                border-color: #3978c5;
+            }
+            QToolButton:pressed {
+                background: #d8e8ff;
             }
             QSplitter::handle {
-                background: #9aa7b4;
+                background: #aab4bf;
+            }
+            QSplitter::handle:hover {
+                background: #4d89d6;
+            }
+            QGroupBox[selectorPane="true"] {
+                background: #ffffff;
+                border: 1px solid #8794a2;
+                border-radius: 6px;
+                margin-top: 10px;
+                padding-top: 6px;
+                font-weight: 600;
+            }
+            QGroupBox[selectorPane="true"]::title {
+                subcontrol-origin: margin;
+                subcontrol-position: top left;
+                left: 9px;
+                padding: 0 5px;
+                color: #174ea6;
+                background: #ffffff;
             }
             QListWidget, QTableView, QPlainTextEdit, QLineEdit, QComboBox, QDoubleSpinBox {
                 background: #ffffff;
-                border: 1px solid #8b9aaa;
+                border: 1px solid #8794a2;
+                border-radius: 4px;
                 selection-background-color: #2563eb;
                 selection-color: #ffffff;
             }
+            QLineEdit, QComboBox, QDoubleSpinBox {
+                min-height: 25px;
+                padding: 1px 6px;
+            }
+            QLineEdit:focus, QComboBox:focus, QDoubleSpinBox:focus,
+            QListWidget:focus, QTableView:focus, QPlainTextEdit:focus {
+                border: 2px solid #2f74c8;
+            }
+            QComboBox::drop-down {
+                border: 0;
+                width: 22px;
+            }
             QListWidget::item {
-                padding: 3px 5px;
+                padding: 4px 6px;
                 border: 1px solid transparent;
             }
             QListWidget::item:selected,
@@ -982,28 +1066,105 @@ class MainWindow(QtWidgets.QMainWindow):
             QPushButton {
                 background: #ffffff;
                 border: 1px solid #7f8fa3;
-                padding: 4px 8px;
+                border-radius: 4px;
+                min-height: 25px;
+                padding: 3px 10px;
             }
             QPushButton:hover {
-                background: #e5effa;
-                border-color: #4f83cc;
+                background: #eaf2ff;
+                border-color: #3978c5;
+            }
+            QPushButton:pressed {
+                background: #d8e8ff;
+            }
+            QPushButton#primaryButton {
+                color: #ffffff;
+                background: #1769c2;
+                border-color: #0e559f;
+                font-weight: 600;
+            }
+            QPushButton#primaryButton:hover {
+                background: #0f5dad;
+            }
+            QPushButton:disabled, QToolButton:disabled,
+            QComboBox:disabled, QLineEdit:disabled, QDoubleSpinBox:disabled {
+                color: #8793a0;
+                background: #e8ebef;
+                border-color: #b7c0c8;
             }
             QTabWidget::pane {
-                border: 1px solid #8b9aaa;
+                border: 1px solid #8794a2;
                 background: #ffffff;
             }
             QTabBar::tab {
                 background: #e7ebf0;
-                border: 1px solid #8b9aaa;
-                padding: 5px 12px;
+                border: 1px solid #8794a2;
+                border-bottom: 0;
+                border-top-left-radius: 4px;
+                border-top-right-radius: 4px;
+                padding: 6px 14px;
             }
             QTabBar::tab:selected {
                 background: #ffffff;
                 border-bottom-color: #ffffff;
+                color: #174ea6;
+                font-weight: 600;
+            }
+            QHeaderView::section {
+                background: #e8edf3;
+                color: #263442;
+                border: 0;
+                border-right: 1px solid #aeb8c2;
+                border-bottom: 1px solid #8794a2;
+                padding: 5px;
+                font-weight: 600;
+            }
+            QProgressBar {
+                min-height: 19px;
+                border: 1px solid #8794a2;
+                border-radius: 4px;
+                background: #ffffff;
+                text-align: center;
+            }
+            QProgressBar::chunk {
+                background: #2f74c8;
+                border-radius: 3px;
+            }
+            QScrollBar:vertical {
+                background: #eef1f4;
+                width: 12px;
+                margin: 0;
+            }
+            QScrollBar::handle:vertical {
+                background: #9ba8b5;
+                border-radius: 4px;
+                min-height: 24px;
+                margin: 2px;
+            }
+            QScrollBar:horizontal {
+                background: #eef1f4;
+                height: 12px;
+                margin: 0;
+            }
+            QScrollBar::handle:horizontal {
+                background: #9ba8b5;
+                border-radius: 4px;
+                min-width: 24px;
+                margin: 2px;
+            }
+            QScrollBar::add-line, QScrollBar::sub-line {
+                width: 0;
+                height: 0;
+            }
+            QToolTip {
+                color: #ffffff;
+                background: #263442;
+                border: 1px solid #101820;
+                padding: 4px;
             }
             QStatusBar {
-                background: #edf0f4;
-                border-top: 1px solid #9aa7b4;
+                background: #ffffff;
+                border-top: 1px solid #8794a2;
             }
         """)
 
@@ -1013,14 +1174,18 @@ class MainWindow(QtWidgets.QMainWindow):
         self.add_action = file_menu.addAction("Add")
         self.reload_action = file_menu.addAction("Reload")
         self.scan_action = file_menu.addAction(QtGui.QIcon(_resource_path("icons", "scan.png")), "Scan folder")
-        export_action = file_menu.addAction("Export selected table")
+        self.export_table_action = file_menu.addAction("Export selected table")
+        self.export_plot_action = file_menu.addAction(
+            QtGui.QIcon(_resource_path("icons", "filesave.svg")), "Export plot"
+        )
         file_menu.addSeparator()
         quit_action = file_menu.addAction("Quit")
         self.open_action.triggered.connect(lambda: self.select_files(add=False))
         self.add_action.triggered.connect(lambda: self.select_files(add=True))
         self.reload_action.triggered.connect(self.reload_files)
         self.scan_action.triggered.connect(self.scan_folder)
-        export_action.triggered.connect(self.export_selected_table)
+        self.export_table_action.triggered.connect(self.export_selected_table)
+        self.export_plot_action.triggered.connect(self.export_plot_image)
         quit_action.triggered.connect(self.close)
 
         toolbar = self.addToolBar("Main")
@@ -1031,14 +1196,15 @@ class MainWindow(QtWidgets.QMainWindow):
         toolbar.addAction(self.reload_action)
         toolbar.addSeparator()
         toolbar.addAction(self.scan_action)
+        toolbar.addAction(self.export_plot_action)
 
         view_menu = self.menuBar().addMenu("&View")
         self.autorange_action = view_menu.addAction("Auto range")
         self.autorange_action.triggered.connect(self.auto_range)
         self.standardize_si_action = view_menu.addAction("Standardize units to SI")
         self.standardize_si_action.triggered.connect(self.standardize_units_si)
-        export_plot_action = view_menu.addAction("Export plot image")
-        export_plot_action.triggered.connect(self.export_plot_image)
+        view_export_plot_action = view_menu.addAction("Export plot")
+        view_export_plot_action.triggered.connect(self.export_plot_image)
 
     def _connect(self):
         self.plot_type_combo.currentIndexChanged.connect(self.on_selection_changed)
@@ -1080,6 +1246,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self.scan_action,
             self.autorange_action,
             self.standardize_si_action,
+            self.export_table_action,
+            self.export_plot_action,
         ):
             action.setEnabled(enabled)
         for widget in (
@@ -1442,6 +1610,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.lazy_entries = []
         self.tab_list.from_dataframes(dataframes=dataframes, names=names, bAdd=False)
         self.populate_tables()
+        self.status_label.setText("{} tables loaded".format(len(self.tab_list)))
         self.redraw()
 
     def reload_files(self):
@@ -1643,6 +1812,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     idx = (it, ix, iy, str(tab.columns[ix]), str(tab.columns[iy]), tab.active_name)
                     pd = PlotData()
                     pd.fromIDs(self.tab_list, len(plot_data), idx, same_col, pipeline=None)
+                    pd.pane_index = pane_index
                     self.apply_plot_type(pd)
                     if same_col:
                         pd.syl = "Set {}: {} - {}".format(pane_index + 1, pd.st, pd.sy)
@@ -1689,6 +1859,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.show_exception("Failed to plot data", exc)
 
     def on_curve_selected(self, meta):
+        self.highlight_curve_table(meta)
         message = "Selected: {label} | file/table: {file} | y: {y} | x: {x} | {points:,} points".format(
             label=meta.get("label", ""),
             file=meta.get("file", ""),
@@ -1697,6 +1868,39 @@ class MainWindow(QtWidgets.QMainWindow):
             points=meta.get("points", 0),
         )
         self.statusBar().showMessage(message)
+
+    def highlight_curve_table(self, meta):
+        table_index = meta.get("table_index")
+        if table_index is None:
+            return
+        pane_index = meta.get("pane_index", 0)
+        panes = self.visible_selector_panes()
+        if not panes:
+            return
+        pane = panes[pane_index] if isinstance(pane_index, int) and pane_index < len(panes) else panes[0]
+        target_row = None
+        for row in range(pane.table_list_widget.count()):
+            item = pane.table_list_widget.item(row)
+            data = item.data(QtCore.Qt.UserRole)
+            if isinstance(data, tuple) and data == ("table", table_index):
+                target_row = row
+                break
+            if isinstance(data, tuple) and data[0] == "lazy":
+                entry = self.lazy_entries[data[1]]
+                if table_index in entry.table_indices:
+                    target_row = row
+                    break
+        if target_row is None:
+            return
+        pane.table_list_widget.blockSignals(True)
+        pane.table_list_widget.clearSelection()
+        item = pane.table_list_widget.item(target_row)
+        item.setSelected(True)
+        pane.table_list_widget.setCurrentItem(item)
+        pane.table_list_widget.scrollToItem(item, QtWidgets.QAbstractItemView.PositionAtCenter)
+        pane.table_list_widget.blockSignals(False)
+        self.update_table_preview()
+        self.update_file_info()
 
     def standardize_units_si(self):
         indices = self.selected_table_indices(load=False)
@@ -1816,22 +2020,55 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def export_plot_image(self):
         if not self.canvas._plots:
+            self.statusBar().showMessage("Create a plot before exporting", 5000)
             return
-        path, _ = QtWidgets.QFileDialog.getSaveFileName(
+        path, selected_filter = QtWidgets.QFileDialog.getSaveFileName(
             self,
-            "Export plot image",
+            "Export plot",
             "pydatview_plot.png",
-            "PNG files (*.png);;SVG files (*.svg);;All files (*)",
+            "PNG files (*.png);;PDF files (*.pdf);;All files (*)",
         )
         if not path:
             return
+        path_lower = path.lower()
+        if "." not in os.path.basename(path):
+            if selected_filter.startswith("PDF"):
+                path += ".pdf"
+                path_lower = path.lower()
+            else:
+                path += ".png"
+                path_lower = path.lower()
+        elif not path_lower.endswith((".png", ".pdf")):
+            path += ".png"
+            path_lower = path.lower()
         try:
-            from pyqtgraph.exporters import ImageExporter, SVGExporter
-            exporter_cls = SVGExporter if path.lower().endswith(".svg") else ImageExporter
-            exporter = exporter_cls(self.canvas.scene())
-            exporter.export(path)
+            if path_lower.endswith(".pdf"):
+                from PySide6 import QtPrintSupport
+                try:
+                    printer_mode = QtPrintSupport.QPrinter.PrinterMode.HighResolution
+                    pdf_format = QtPrintSupport.QPrinter.OutputFormat.PdfFormat
+                except AttributeError:
+                    printer_mode = QtPrintSupport.QPrinter.HighResolution
+                    pdf_format = QtPrintSupport.QPrinter.PdfFormat
+                printer = QtPrintSupport.QPrinter(printer_mode)
+                printer.setOutputFormat(pdf_format)
+                printer.setOutputFileName(path)
+                painter = QtGui.QPainter(printer)
+                paint_rect = printer.pageLayout().paintRectPixels(printer.resolution())
+                self.canvas.scene().render(
+                    painter,
+                    QtCore.QRectF(paint_rect),
+                    self.canvas.scene().sceneRect(),
+                    QtCore.Qt.KeepAspectRatio,
+                )
+                painter.end()
+            else:
+                from pyqtgraph.exporters import ImageExporter
+                exporter = ImageExporter(self.canvas.scene())
+                exporter.export(path)
+            self.statusBar().showMessage("Plot exported to {}".format(path), 8000)
         except Exception as exc:
-            self.show_exception("Failed to export plot image", exc)
+            self.show_exception("Failed to export plot", exc)
 
     def export_selected_table(self):
         indices = self.selected_table_indices()

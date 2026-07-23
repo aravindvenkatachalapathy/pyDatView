@@ -204,6 +204,7 @@ def read_bladed_output(sensorFilename, readTimeFilesOnly=False):
                 )
                 data = np.asarray(data)
                 sensorInfo['nMajor'] = nMajorRust
+                sensorInfo['loader_backend'] = 'rust'
                 if sensorInfo['NDIMENS'] == 3:
                     sensorInfo['ChannelName'], sensorInfo['ChannelUnit'] = organize_bladed_3d_columns(**sensorInfo)
                 print('[pyDatView] Bladed binary load: Rust ({})'.format(dataFilename))
@@ -365,6 +366,8 @@ class BladedFile(File):
                 # dataset with this length are already present, we concatenate
                 dset = dataSets[key]
                 dset['data'] =  np.column_stack((dset['data'], data))
+                dset.pop('_numpy_plot_data', None)
+                dset.pop('_numpy_plot_column_offset', None)
                 dset['sensors'] += info['ChannelName']
                 dset['units']   += info['ChannelUnit']
                 dset['name']  = 'Misc_'+str(key)
@@ -373,8 +376,10 @@ class BladedFile(File):
                 # We add a new dataset for this length
                 dataSets[key] = {}
                 dset = dataSets[key]
+                native_plot_data = data if info.get('loader_backend') == 'rust' else None
                 # We force a time vector when possible
-                if 'MIN' and 'STEP' in info.keys():
+                has_time = 'MIN' in info and 'STEP' in info
+                if has_time:
                     time = np.arange(info['nMajor'])*info['STEP'] + info['MIN']
                     data = np.column_stack((time, data))
                     info['ChannelName'].insert(0, 'Time')
@@ -384,6 +389,9 @@ class BladedFile(File):
                 dset['sensors'] = info['ChannelName']
                 dset['units']   = info['ChannelUnit']
                 dset['name']    = info['category']
+                if native_plot_data is not None:
+                    dset['_numpy_plot_data'] = native_plot_data
+                    dset['_numpy_plot_column_offset'] = 2 if has_time else 1
 
         # Check if we have "many" misc, if only one, replace by "Misc"
         keyMisc = [k for k,v in dataSets.items() if v['name'].startswith('Misc_')]
@@ -409,6 +417,18 @@ class BladedFile(File):
             return dfs[next(iter(dfs))]
         else:
             return dfs
+
+    def get_numpy_plot_data(self, table_name=''):
+        dset = self.dataSets.get(table_name)
+        if dset is None and len(self.dataSets) == 1:
+            dset = next(iter(self.dataSets.values()))
+        if dset is None or '_numpy_plot_data' not in dset:
+            return None
+        return (
+            dset['_numpy_plot_data'],
+            dset['_numpy_plot_column_offset'],
+            'Rust',
+        )
     
 
 def isBinary(filename):

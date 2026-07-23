@@ -544,6 +544,10 @@ class Table(object):
         self.fileobject = fileobject
         self.mask=None
         self.columns_pre_transpose = None
+        self._native_plot_matrix = None
+        self._native_plot_column_offset = 0
+        self._native_plot_backend = ''
+        self._native_plot_logged = False
 
         self.filename        = filename
         self.fileformat      = fileformat
@@ -558,6 +562,7 @@ class Table(object):
         
         # --- Modify and store input DataFrame 
         self.setData(data, dayfirst=dayfirst)
+        self._attachNativePlotData(name)
 
         # --- Trying to figure out how to name this table
         if name is None or len(str(name))==0:
@@ -566,6 +571,7 @@ class Table(object):
         self.setupName(name=str(name))
 
     def setData(self, data, dayfirst=False):
+        self._invalidateNativePlotData()
         # sanitize columns, we only accept strings
         data.columns = data.columns.astype(str)
 
@@ -587,6 +593,28 @@ class Table(object):
         # --- Store in object
         self.data    = data 
         self.convertTimeColumns(dayfirst=dayfirst)
+
+    def _attachNativePlotData(self, table_name=''):
+        getter = getattr(self.fileobject, 'get_numpy_plot_data', None)
+        if getter is None:
+            return
+        source = getter(table_name)
+        if source is None:
+            return
+        matrix, column_offset, backend = source
+        if not isinstance(matrix, np.ndarray) or matrix.ndim != 2:
+            return
+        if matrix.shape[0] != self.data.shape[0]:
+            return
+        self._native_plot_matrix = matrix
+        self._native_plot_column_offset = int(column_offset)
+        self._native_plot_backend = str(backend)
+
+    def _invalidateNativePlotData(self):
+        self._native_plot_matrix = None
+        self._native_plot_column_offset = 0
+        self._native_plot_backend = ''
+        self._native_plot_logged = False
 
     def transpose(self):
         # Not done smartly, likely to duplicate memory..
@@ -695,6 +723,7 @@ class Table(object):
         else:
             name_new=None
             self.data=df_new
+            self._invalidateNativePlotData()
         return df_new, name_new
 
     def applyFiltering(self, iCol, options, bAdd=True):
@@ -709,6 +738,7 @@ class Table(object):
         else:
             name_new=None
             self.data=df_new
+            self._invalidateNativePlotData()
         return df_new, name_new
 
 
@@ -766,6 +796,7 @@ class Table(object):
         # NOTE: moved to a plugin, but interface kept
         from pydatview.plugins.data_standardizeUnits import changeUnitsTab
         changeUnitsTab(self, data=data)
+        self._invalidateNativePlotData()
 
     def convertTimeColumns(self, dayfirst=False):
 
@@ -849,6 +880,7 @@ class Table(object):
 
     def deleteColumns(self, ICol):
         """ Delete columns by index, not column names which can have duplicates"""
+        self._invalidateNativePlotData()
         IKeep =[i for i in np.arange(self.data.shape[1]) if i not in ICol]
         self.data = self.data.iloc[:, IKeep] # Drop won't work for duplicates
         # TODO find a way to add a "formula" attribute to a column of a dataframe to avoid dealing with "pos".
@@ -867,6 +899,7 @@ class Table(object):
         self.name='>'+new_name
 
     def addColumn(self, sNewName, NewCol, i=-1, sFormula=''):
+        self._invalidateNativePlotData()
         if i<0:
             i=self.data.shape[1]
         elif i>self.data.shape[1]+1:
@@ -879,6 +912,7 @@ class Table(object):
         self.formulas.append({'pos': i+1, 'formula': sFormula, 'name': sNewName})
     
     def setColumn(self,sNewName,NewCol,i,sFormula=''):
+        self._invalidateNativePlotData()
         if i<1:
             raise ValueError('Cannot set column at position ' + str(i))
         self.data = self.data.drop(columns=self.data.columns[i])
@@ -894,6 +928,16 @@ class Table(object):
 
         TODO TODO TODO get rid of this!
         """
+        if self.mask is None and self._native_plot_matrix is not None:
+            native_i = i - self._native_plot_column_offset
+            if 0 <= native_i < self._native_plot_matrix.shape[1]:
+                x = self._native_plot_matrix[:, native_i]
+                if not self._native_plot_logged:
+                    print('[pyDatView] Plot data: {} -> NumPy view -> PyQtGraph ({})'.format(
+                        self._native_plot_backend or 'native', self.filename
+                    ))
+                    self._native_plot_logged = True
+                return x, False, False, x
         if self.mask is not None:
             c = self.data.iloc[self.mask, i]
             x = self.data.iloc[self.mask, i].values
@@ -1034,7 +1078,5 @@ if __name__ == '__main__':
     import pandas as pd;
     from Tables import Table
     import numpy as np
-
-
 
 

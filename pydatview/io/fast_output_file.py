@@ -88,6 +88,8 @@ class FASTOutputFile(File):
         self.filename    = filename
         self.data        = None  # pandas.DataFrame
         self.description = ''    # string
+        self._numpy_plot_data = None
+        self._loader_backend = ''
         if filename:
             self.read(**kwargs)
 
@@ -115,6 +117,8 @@ class FASTOutputFile(File):
 
         ext = os.path.splitext(self.filename.lower())[1]
         info={}
+        self._numpy_plot_data = None
+        self._loader_backend = ''
         self['binary']=False
         try:
             if ext in ['.out','.elev','.dbg','.dbg2']:
@@ -156,12 +160,20 @@ class FASTOutputFile(File):
             cols=info['attribute_names']
         self.description = info.get('description', '')
         self.description = ''.join(self.description) if isinstance(self.description,list) else self.description
+        if info.get('loader_backend') == 'rust' and isinstance(self.data, np.ndarray):
+            self._numpy_plot_data = self.data
+            self._loader_backend = 'Rust'
         if isinstance(self.data, pd.DataFrame):
             self.data.columns = cols
         else:
             if len(cols)!=self.data.shape[1]:
                 raise BrokenFormatError('Inconstistent number of columns between headers ({}) and data ({}) for file {}'.format(len(cols), self.data.shape[1], self.filename))
             self.data = pd.DataFrame(data=self.data, columns=cols)
+
+    def get_numpy_plot_data(self, table_name=''):
+        if self._numpy_plot_data is None:
+            return None
+        return self._numpy_plot_data, 1, self._loader_backend
 
 
     def write(self, filename=None, binary=None, fileID=4): 
@@ -454,6 +466,7 @@ def load_binary_output(filename, use_buffer=False, method='mix', use_rust=True, 
     if use_rust and pydatview_fastio is not None and not use_buffer:
         try:
             data, info = pydatview_fastio.read_fast_outb(filename)
+            info['loader_backend'] = 'rust'
             print('[pyDatView] OpenFAST binary load: Rust ({})'.format(filename))
             return data, info
         except Exception as e:
