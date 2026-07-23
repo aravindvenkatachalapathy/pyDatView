@@ -807,14 +807,16 @@ class MainWindow(QtWidgets.QMainWindow):
         load_controls.addWidget(self.loading_progress)
         top.addLayout(load_controls, 1, 10)
 
-        splitter = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
-        root.addWidget(splitter, 1)
+        self.main_splitter = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
+        self.main_splitter.setChildrenCollapsible(False)
+        root.addWidget(self.main_splitter, 1)
 
         side = QtWidgets.QWidget()
         side_layout = QtWidgets.QVBoxLayout(side)
         side_layout.setContentsMargins(0, 0, 0, 0)
 
-        self.selector_splitter = QtWidgets.QSplitter(QtCore.Qt.Vertical)
+        self.selector_splitter = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
+        self.selector_splitter.setChildrenCollapsible(False)
         side_layout.addWidget(self.selector_splitter, 1)
         self.set_compare_pane_count(1)
 
@@ -857,11 +859,11 @@ class MainWindow(QtWidgets.QMainWindow):
         right_splitter.setStretchFactor(1, 1)
         right_splitter.setSizes([620, 180])
 
-        splitter.addWidget(side)
-        splitter.addWidget(right_splitter)
-        splitter.setStretchFactor(0, 0)
-        splitter.setStretchFactor(1, 1)
-        splitter.setSizes([320, 960])
+        self.main_splitter.addWidget(side)
+        self.main_splitter.addWidget(right_splitter)
+        self.main_splitter.setStretchFactor(0, 0)
+        self.main_splitter.setStretchFactor(1, 1)
+        self.main_splitter.setSizes([340, 940])
 
         self.setStatusBar(QtWidgets.QStatusBar())
         self._apply_light_borders()
@@ -869,6 +871,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def create_selector_pane(self, index):
         frame = QtWidgets.QGroupBox("Set {}".format(index + 1))
         frame.setProperty("selectorPane", True)
+        frame.setMinimumWidth(230)
         layout = QtWidgets.QVBoxLayout(frame)
         layout.setContentsMargins(8, 10, 8, 8)
         layout.setSpacing(6)
@@ -923,7 +926,17 @@ class MainWindow(QtWidgets.QMainWindow):
             pane.frame.setTitle("Set {}".format(i + 1))
             pane.frame.setVisible(i < count)
         if self.selector_panes:
-            self.selector_splitter.setSizes([1] * count)
+            self.selector_splitter.setSizes([290] * count)
+
+    def resize_compare_region(self):
+        count = self.compare_pane_count()
+        sizes = self.main_splitter.sizes()
+        available = sum(sizes) if sum(sizes) > 0 else max(self.width() - 16, 1000)
+        minimum_plot_width = 420
+        selector_width = max(340, count * 290)
+        selector_width = min(selector_width, max(340, available - minimum_plot_width))
+        self.main_splitter.setSizes([selector_width, max(minimum_plot_width, available - selector_width)])
+        self.selector_splitter.setSizes([290] * count)
 
     def visible_selector_panes(self):
         return self.selector_panes[:self.compare_pane_count()]
@@ -1227,6 +1240,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def on_compare_mode_changed(self):
         self.set_compare_pane_count(self.compare_pane_count())
         self.populate_tables()
+        QtCore.QTimer.singleShot(0, self.resize_compare_region)
         self.on_selection_changed()
 
     def update_lazy_worker_limit(self):
