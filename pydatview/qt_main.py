@@ -431,18 +431,27 @@ class DataFrameModel(QtCore.QAbstractTableModel):
 
 
 class ScanDialog(QtWidgets.QDialog):
-    def __init__(self, file_formats, parent=None):
+    def __init__(self, file_formats, parent=None, settings=None):
         super().__init__(parent)
         self.setWindowTitle("Scan folder")
         self.resize(620, 560)
         self.file_formats = list(file_formats)
+        self.settings = settings or QtCore.QSettings("NREL", "pyDatView")
         self.check_states = {}
+        saved_formats = self.settings.value("scan/formats", [])
+        if isinstance(saved_formats, str):
+            saved_formats = [saved_formats]
+        saved_formats = set(saved_formats or [])
+        for i_fmt, fmt in enumerate(self.file_formats):
+            if fmt.name in saved_formats:
+                self.check_states[i_fmt] = QtCore.Qt.Checked
 
         root = QtWidgets.QVBoxLayout(self)
 
         folder_row = QtWidgets.QHBoxLayout()
         self.folder_edit = QtWidgets.QLineEdit()
         self.folder_edit.setPlaceholderText("Folder containing simulation files")
+        self.folder_edit.setText(str(self.settings.value("scan/folder", "") or ""))
         browse_button = QtWidgets.QPushButton("Browse")
         browse_button.clicked.connect(self.browse_folder)
         folder_row.addWidget(self.folder_edit, 1)
@@ -450,13 +459,14 @@ class ScanDialog(QtWidgets.QDialog):
         root.addLayout(folder_row)
 
         self.recursive_check = QtWidgets.QCheckBox("Include subfolders")
-        self.recursive_check.setChecked(True)
+        self.recursive_check.setChecked(self.settings.value("scan/recursive", True, type=bool))
         root.addWidget(self.recursive_check)
 
         bladed_row = QtWidgets.QHBoxLayout()
         bladed_row.addWidget(QtWidgets.QLabel("Bladed suffixes"))
         self.bladed_suffix_edit = QtWidgets.QLineEdit()
         self.bladed_suffix_edit.setPlaceholderText("04, 05, 298")
+        self.bladed_suffix_edit.setText(str(self.settings.value("scan/bladed_suffixes", "") or ""))
         self.bladed_suffix_edit.setToolTip(
             "Only for Bladed output scans. Example: 04 matches .$04, .%04, or .04."
         )
@@ -489,6 +499,9 @@ class ScanDialog(QtWidgets.QDialog):
         self.select_all_button.clicked.connect(lambda: self.set_visible_checked(True))
         self.clear_button.clicked.connect(lambda: self.set_visible_checked(False))
         self.populate_formats()
+        geometry = self.settings.value("scan/geometry")
+        if geometry is not None:
+            self.restoreGeometry(geometry)
 
     def browse_folder(self):
         folder = QtWidgets.QFileDialog.getExistingDirectory(self, "Select folder", self.folder_edit.text())
@@ -557,6 +570,17 @@ class ScanDialog(QtWidgets.QDialog):
         if not self.selected_specs():
             QtWidgets.QMessageBox.warning(self, "Scan folder", "Select at least one file type.")
             return
+        selected_formats = [
+            self.file_formats[i_fmt].name
+            for i_fmt, state in self.check_states.items()
+            if state == QtCore.Qt.Checked
+        ]
+        self.settings.setValue("scan/folder", self.selected_folder())
+        self.settings.setValue("scan/recursive", self.recursive())
+        self.settings.setValue("scan/bladed_suffixes", self.bladed_suffix_edit.text().strip())
+        self.settings.setValue("scan/formats", selected_formats)
+        self.settings.setValue("scan/geometry", self.saveGeometry())
+        self.settings.sync()
         super().accept()
 
 
@@ -704,6 +728,7 @@ class MainWindow(QtWidgets.QMainWindow):
         super().__init__()
         self.setWindowTitle("pyDatView Qt")
         self.resize(1280, 820)
+        self.settings = QtCore.QSettings("NREL", "pyDatView")
         self.tab_list = TableList()
         self.file_formats, self.file_format_errors = self._load_file_formats()
         self.plot_data = []
@@ -737,6 +762,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._build_actions()
 
         central = QtWidgets.QWidget()
+        central.setObjectName("appBackground")
         self.setCentralWidget(central)
         root = QtWidgets.QVBoxLayout(central)
         root.setContentsMargins(8, 8, 8, 8)
@@ -812,6 +838,7 @@ class MainWindow(QtWidgets.QMainWindow):
         root.addWidget(self.main_splitter, 1)
 
         side = QtWidgets.QWidget()
+        side.setObjectName("selectorArea")
         side_layout = QtWidgets.QVBoxLayout(side)
         side_layout.setContentsMargins(0, 0, 0, 0)
 
@@ -943,17 +970,26 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _apply_light_borders(self):
         self.setStyleSheet("""
-            QMainWindow, QWidget {
-                background: #f4f6f8;
+            QWidget {
                 color: #17212b;
             }
+            QMainWindow, QDialog, QWidget#appBackground {
+                background: #dbe2e9;
+            }
+            QWidget#selectorArea {
+                background: #dbe2e9;
+            }
             QFrame#plotControls {
-                background: #ffffff;
-                border: 1px solid #8c99a6;
+                background: #eef2f6;
+                border: 1px solid #657585;
                 border-radius: 6px;
             }
             QLabel[sectionLabel="true"] {
-                color: #536273;
+                color: #364656;
+                background: #e1e7ed;
+                border: 1px solid #c4ced8;
+                border-radius: 3px;
+                padding: 2px 4px;
                 font-size: 10px;
                 font-weight: 700;
             }
@@ -965,8 +1001,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 padding: 4px 8px;
             }
             QMenuBar {
-                background: #ffffff;
-                border-bottom: 1px solid #8794a2;
+                background: #d6dee7;
+                border-bottom: 1px solid #657585;
                 spacing: 4px;
             }
             QMenuBar::item {
@@ -981,7 +1017,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 border: 1px solid #729bd3;
             }
             QMenu {
-                background: #ffffff;
+                background: #f7f9fb;
                 border: 1px solid #657585;
                 padding: 4px;
             }
@@ -994,16 +1030,16 @@ class MainWindow(QtWidgets.QMainWindow):
                 border: 1px solid #4f83cc;
             }
             QToolBar {
-                background: #f7f9fb;
-                border: 1px solid #8794a2;
+                background: #e1e7ed;
+                border: 1px solid #657585;
                 border-left: 0;
                 border-right: 0;
                 spacing: 5px;
                 padding: 4px 7px;
             }
             QToolButton {
-                background: #ffffff;
-                border: 1px solid #8c99a6;
+                background: #f7f9fb;
+                border: 1px solid #758493;
                 border-radius: 4px;
                 padding: 5px;
             }
@@ -1015,14 +1051,14 @@ class MainWindow(QtWidgets.QMainWindow):
                 background: #d8e8ff;
             }
             QSplitter::handle {
-                background: #aab4bf;
+                background: #8796a5;
             }
             QSplitter::handle:hover {
                 background: #4d89d6;
             }
             QGroupBox[selectorPane="true"] {
-                background: #ffffff;
-                border: 1px solid #8794a2;
+                background: #f7f9fb;
+                border: 1px solid #657585;
                 border-radius: 6px;
                 margin-top: 10px;
                 padding-top: 6px;
@@ -1034,12 +1070,13 @@ class MainWindow(QtWidgets.QMainWindow):
                 left: 9px;
                 padding: 0 5px;
                 color: #174ea6;
-                background: #ffffff;
+                background: #f7f9fb;
             }
             QListWidget, QTableView, QPlainTextEdit, QLineEdit, QComboBox, QDoubleSpinBox {
                 background: #ffffff;
-                border: 1px solid #8794a2;
+                border: 1px solid #758493;
                 border-radius: 4px;
+                alternate-background-color: #edf2f7;
                 selection-background-color: #2563eb;
                 selection-color: #ffffff;
             }
@@ -1077,8 +1114,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 color: #ffffff;
             }
             QPushButton {
-                background: #ffffff;
-                border: 1px solid #7f8fa3;
+                background: #e5ebf1;
+                border: 1px solid #758493;
                 border-radius: 4px;
                 min-height: 25px;
                 padding: 3px 10px;
@@ -1106,12 +1143,12 @@ class MainWindow(QtWidgets.QMainWindow):
                 border-color: #b7c0c8;
             }
             QTabWidget::pane {
-                border: 1px solid #8794a2;
+                border: 1px solid #657585;
                 background: #ffffff;
             }
             QTabBar::tab {
-                background: #e7ebf0;
-                border: 1px solid #8794a2;
+                background: #cfd8e2;
+                border: 1px solid #758493;
                 border-bottom: 0;
                 border-top-left-radius: 4px;
                 border-top-right-radius: 4px;
@@ -1124,7 +1161,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 font-weight: 600;
             }
             QHeaderView::section {
-                background: #e8edf3;
+                background: #d6dee7;
                 color: #263442;
                 border: 0;
                 border-right: 1px solid #aeb8c2;
@@ -1134,9 +1171,9 @@ class MainWindow(QtWidgets.QMainWindow):
             }
             QProgressBar {
                 min-height: 19px;
-                border: 1px solid #8794a2;
+                border: 1px solid #758493;
                 border-radius: 4px;
-                background: #ffffff;
+                background: #f7f9fb;
                 text-align: center;
             }
             QProgressBar::chunk {
@@ -1176,8 +1213,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 padding: 4px;
             }
             QStatusBar {
-                background: #ffffff;
-                border-top: 1px solid #8794a2;
+                background: #d6dee7;
+                border-top: 1px solid #657585;
             }
         """)
 
@@ -1334,7 +1371,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.load_files(filenames, add=add)
 
     def scan_folder(self):
-        dialog = ScanDialog(self.file_formats, self)
+        dialog = ScanDialog(self.file_formats, self, settings=self.settings)
         if dialog.exec() != QtWidgets.QDialog.Accepted:
             return
 
