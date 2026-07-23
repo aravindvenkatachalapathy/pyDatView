@@ -712,6 +712,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.lazy_warning_backlog = []
         self.plot_after_lazy_load = False
         self.selector_panes = []
+        self.lazy_batch_total = 0
+        self.lazy_batch_done = 0
 
         self._build_ui()
         self._connect()
@@ -759,6 +761,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.load_workers_combo = QtWidgets.QComboBox()
         self.load_workers_combo.addItems(["Auto", "1", "2", "4", "8", "16", "32", "64", "96"])
         self.load_workers_combo.setToolTip("Maximum parallel file load workers. Auto is capped on Windows to reduce UI hangs.")
+        self.loading_progress = QtWidgets.QProgressBar()
+        self.loading_progress.setRange(0, 1)
+        self.loading_progress.setValue(0)
+        self.loading_progress.setFormat("Loading %v/%m")
+        self.loading_progress.setMaximumWidth(180)
+        self.loading_progress.setVisible(False)
         self.status_label = QtWidgets.QLabel("No files loaded")
         top.addWidget(QtWidgets.QLabel("Plot:"))
         top.addWidget(self.plot_type_combo)
@@ -777,6 +785,7 @@ class MainWindow(QtWidgets.QMainWindow):
         top.addWidget(self.marker_combo)
         top.addWidget(QtWidgets.QLabel("Load:"))
         top.addWidget(self.load_workers_combo)
+        top.addWidget(self.loading_progress)
         top.addStretch(1)
         top.addWidget(self.status_label)
 
@@ -1063,6 +1072,71 @@ class MainWindow(QtWidgets.QMainWindow):
         self.statusBar().showMessage("Parallel file load workers: {}".format(self.lazy_max_workers), 8000)
         self.start_next_lazy_load()
 
+    def set_loading_controls_enabled(self, enabled):
+        for action in (
+            self.open_action,
+            self.add_action,
+            self.reload_action,
+            self.scan_action,
+            self.autorange_action,
+            self.standardize_si_action,
+        ):
+            action.setEnabled(enabled)
+        for widget in (
+            self.plot_type_combo,
+            self.mode_combo,
+            self.compare_combo,
+            self.live_plot,
+            self.grid_check,
+            self.logx_check,
+            self.logy_check,
+            self.legend_check,
+            self.line_width_spin,
+            self.marker_combo,
+            self.load_workers_combo,
+            self.plot_button,
+            self.clear_button,
+            self.select_all_y_button,
+            self.select_none_y_button,
+            self.load_selected_button,
+        ):
+            widget.setEnabled(enabled)
+        for pane in self.selector_panes:
+            pane.frame.setEnabled(enabled)
+
+    def begin_lazy_load_batch(self, total):
+        if total <= 0:
+            return
+        if self.lazy_batch_total == 0:
+            self.lazy_batch_done = 0
+            self.lazy_batch_total = total
+        else:
+            self.lazy_batch_total += total
+        self.loading_progress.setRange(0, self.lazy_batch_total)
+        self.loading_progress.setValue(self.lazy_batch_done)
+        self.loading_progress.setFormat("Loading %v/%m")
+        self.loading_progress.setVisible(True)
+        self.set_loading_controls_enabled(False)
+
+    def advance_lazy_load_progress(self):
+        if self.lazy_batch_total <= 0:
+            return
+        self.lazy_batch_done = min(self.lazy_batch_done + 1, self.lazy_batch_total)
+        self.loading_progress.setValue(self.lazy_batch_done)
+        self.loading_progress.setFormat("Loading {}/{}".format(self.lazy_batch_done, self.lazy_batch_total))
+
+    def finish_lazy_load_batch_if_done(self):
+        if self.lazy_batch_total <= 0:
+            return
+        if self.lazy_load_queue or self.lazy_loader_threads:
+            return
+        self.loading_progress.setValue(self.lazy_batch_total)
+        self.loading_progress.setFormat("Loaded {}/{}".format(self.lazy_batch_done, self.lazy_batch_total))
+        self.loading_progress.setVisible(False)
+        self.lazy_batch_total = 0
+        self.lazy_batch_done = 0
+        self.set_loading_controls_enabled(True)
+
     def _show_file_format_errors(self):
         for err in self.file_format_errors:
             self.statusBar().showMessage(str(err), 10000)
@@ -1229,10 +1303,21 @@ class MainWindow(QtWidgets.QMainWindow):
         self.queue_lazy_load(lazy_index)
         return []
 
+    def pending_lazy_indices(self, lazy_indices):
+        pending = []
+        for lazy_index in lazy_indices:
+            entry = self.lazy_entries[lazy_index]
+            if entry.loaded or entry.loading or entry.attempted or lazy_index in self.lazy_load_queue:
+                continue
+            pending.append(lazy_index)
+        return pending
+
     def queue_lazy_load(self, lazy_index):
         entry = self.lazy_entries[lazy_index]
         if entry.loaded or entry.loading or entry.attempted or lazy_index in self.lazy_load_queue:
             return
+        if self.lazy_batch_total == 0:
+            self.begin_lazy_load_batch(1)
         entry.loading = True
         self.lazy_load_queue.append(lazy_index)
         self.status_label.setText("Loading {}".format(entry.basename))
@@ -1282,6 +1367,7 @@ class MainWindow(QtWidgets.QMainWindow):
         entry.warning = warning or ""
         entry.attempted = True
         entry.loading = False
+        self.advance_lazy_load_progress()
         self.update_lazy_item(lazy_index)
         self.current_files = sorted(set(self.current_files + self.tab_list.filenames))
         self.status_label.setText(
@@ -1304,6 +1390,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.plot_after_lazy_load and not self.has_unloaded_lazy_selection():
             self.plot_after_lazy_load = False
             self.redraw()
+        self.finish_lazy_load_batch_if_done()
 
     def on_lazy_thread_finished(self, lazy_index):
         self.lazy_loader_threads.pop(lazy_index, None)
@@ -1314,6 +1401,7 @@ class MainWindow(QtWidgets.QMainWindow):
             )
         )
         self.start_next_lazy_load()
+        self.finish_lazy_load_batch_if_done()
 
     def is_lazy_selected(self, lazy_index):
         for pane in self.visible_selector_panes():
@@ -1335,6 +1423,7 @@ class MainWindow(QtWidgets.QMainWindow):
         lazy_indices = self.selected_lazy_indices()
         if not lazy_indices:
             return
+        self.begin_lazy_load_batch(len(self.pending_lazy_indices(lazy_indices)))
         for i, lazy_index in enumerate(lazy_indices):
             self.statusBar().showMessage("Queueing selected file {}/{}".format(i + 1, len(lazy_indices)))
             self.ensure_lazy_loaded(lazy_index, show_warning=False)
@@ -1360,6 +1449,10 @@ class MainWindow(QtWidgets.QMainWindow):
             self.lazy_generation += 1
             self.lazy_load_queue = []
             self.lazy_warning_backlog = []
+            self.lazy_batch_total = 0
+            self.lazy_batch_done = 0
+            self.loading_progress.setVisible(False)
+            self.set_loading_controls_enabled(True)
             for entry in self.lazy_entries:
                 entry.table_indices = []
                 entry.warning = ""
@@ -1572,6 +1665,7 @@ class MainWindow(QtWidgets.QMainWindow):
         try:
             if self.has_unloaded_lazy_selection():
                 self.plot_after_lazy_load = True
+                self.begin_lazy_load_batch(len(self.pending_lazy_indices(self.selected_lazy_indices())))
                 self.selected_table_indices(load=True)
                 self.statusBar().showMessage("Loading selected files before plotting ...", 8000)
                 return
