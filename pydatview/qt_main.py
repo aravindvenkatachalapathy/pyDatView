@@ -77,6 +77,8 @@ class LazyFileEntry:
 class SelectorPane:
     frame: object
     table_list_widget: object
+    bladed_dataset_label: object
+    bladed_dataset_combo: object
     column_filter: object
     x_combo: object
     y_list_widget: object
@@ -908,6 +910,14 @@ class MainWindow(QtWidgets.QMainWindow):
         table_list_widget = QtWidgets.QListWidget()
         table_list_widget.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
         layout.addWidget(table_list_widget, 2)
+        bladed_dataset_label = QtWidgets.QLabel("BLADED VARIABLES")
+        bladed_dataset_label.setProperty("sectionLabel", True)
+        bladed_dataset_label.setVisible(False)
+        layout.addWidget(bladed_dataset_label)
+        bladed_dataset_combo = QtWidgets.QComboBox()
+        bladed_dataset_combo.setToolTip("Variable group loaded from the selected Bladed .$PJ project")
+        bladed_dataset_combo.setVisible(False)
+        layout.addWidget(bladed_dataset_combo)
         x_label = QtWidgets.QLabel("X COLUMN")
         x_label.setProperty("sectionLabel", True)
         layout.addWidget(x_label)
@@ -924,8 +934,19 @@ class MainWindow(QtWidgets.QMainWindow):
         y_list_widget.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
         layout.addWidget(y_list_widget, 3)
 
-        pane = SelectorPane(frame, table_list_widget, column_filter, x_combo, y_list_widget)
+        pane = SelectorPane(
+            frame,
+            table_list_widget,
+            bladed_dataset_label,
+            bladed_dataset_combo,
+            column_filter,
+            x_combo,
+            y_list_widget,
+        )
         table_list_widget.itemSelectionChanged.connect(self.on_table_selection_changed)
+        bladed_dataset_combo.currentIndexChanged.connect(
+            lambda _index, p=pane: self.on_bladed_dataset_changed(p)
+        )
         x_combo.currentIndexChanged.connect(self.on_selection_changed)
         y_list_widget.itemSelectionChanged.connect(self.on_selection_changed)
         column_filter.textChanged.connect(lambda _text, p=pane: self.populate_columns(p))
@@ -1725,6 +1746,12 @@ class MainWindow(QtWidgets.QMainWindow):
         panes = [pane] if pane is not None else self.visible_selector_panes()
         indices = []
         for p in panes:
+            if not p.bladed_dataset_combo.isHidden():
+                table_index = p.bladed_dataset_combo.currentData()
+                if isinstance(table_index, int) and 0 <= table_index < len(self.tab_list):
+                    if table_index not in indices:
+                        indices.append(table_index)
+                    continue
             for item in p.table_list_widget.selectedItems():
                 data = item.data(QtCore.Qt.UserRole)
                 if isinstance(data, tuple) and data[0] == "table":
@@ -1744,7 +1771,56 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def on_table_selection_changed(self):
         for pane in self.visible_selector_panes():
+            self.populate_bladed_datasets(pane)
             self.populate_columns(pane)
+        self.update_table_preview()
+        self.update_file_info()
+        self.on_selection_changed()
+
+    def populate_bladed_datasets(self, pane):
+        previous_table_index = pane.bladed_dataset_combo.currentData()
+        table_indices = []
+        selected_items = pane.table_list_widget.selectedItems()
+        if len(selected_items) == 1:
+            data = selected_items[0].data(QtCore.Qt.UserRole)
+            if isinstance(data, tuple) and data[0] == "lazy":
+                entry = self.lazy_entries[data[1]]
+                is_bladed = getattr(entry.file_format, "name", "") == "Bladed output file"
+                is_project = os.path.splitext(entry.path)[1].lower() == ".$pj"
+                if is_bladed and is_project and entry.loaded:
+                    table_indices = list(entry.table_indices)
+            elif isinstance(data, tuple) and data[0] == "table":
+                table_index = data[1]
+                tab = self.tab_list[table_index]
+                if os.path.splitext(tab.filename)[1].lower() == ".$pj":
+                    table_indices = [
+                        i for i, candidate in enumerate(self.tab_list)
+                        if candidate.filename == tab.filename
+                    ]
+
+        pane.bladed_dataset_combo.blockSignals(True)
+        pane.bladed_dataset_combo.clear()
+        for table_index in table_indices:
+            tab = self.tab_list[table_index]
+            label = "{}  ({})".format(tab.nickname, tab.shapestring)
+            pane.bladed_dataset_combo.addItem(label, table_index)
+        if table_indices:
+            selected_index = (
+                previous_table_index
+                if previous_table_index in table_indices
+                else table_indices[0]
+            )
+            pane.bladed_dataset_combo.setCurrentIndex(table_indices.index(selected_index))
+        visible = bool(table_indices)
+        pane.bladed_dataset_label.setVisible(visible)
+        pane.bladed_dataset_combo.setVisible(visible)
+        pane.bladed_dataset_combo.blockSignals(False)
+
+    def on_bladed_dataset_changed(self, pane):
+        if pane.bladed_dataset_combo.isHidden():
+            return
+        pane.y_list_widget.clearSelection()
+        self.populate_columns(pane)
         self.update_table_preview()
         self.update_file_info()
         self.on_selection_changed()
@@ -1760,7 +1836,7 @@ class MainWindow(QtWidgets.QMainWindow):
             lazy_index = lazy_indices[0]
             entry = self.lazy_entries[lazy_index]
             if entry.loaded:
-                indices = list(entry.table_indices)
+                indices = self.selected_table_indices(load=False, pane=pane)
             else:
                 self.ensure_lazy_header(lazy_index)
                 columns = list(entry.columns)

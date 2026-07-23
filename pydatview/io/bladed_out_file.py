@@ -311,7 +311,8 @@ class BladedFile(File):
         """
 
         basename, ext = os.path.splitext(self.filename)
-        if ext.lower()=='.$pj':
+        is_project = ext.lower()=='.$pj'
+        if is_project:
             readTimeFilesOnly=True
             searchPattern = basename + '.%[0-9][0-9]*' # find all files in the folder
         else:
@@ -361,6 +362,30 @@ class BladedFile(File):
             
             # we use number of data as key, but we'll use "name" later
             key = info['nMajor']
+
+            if is_project:
+                dset = {}
+                native_plot_data = data if info.get('loader_backend') == 'rust' else None
+                has_time = 'MIN' in info and 'STEP' in info
+                if has_time:
+                    time = np.arange(info['nMajor'])*info['STEP'] + info['MIN']
+                    data = np.column_stack((time, data))
+                    info['ChannelName'].insert(0, 'Time')
+                    info['ChannelUnit'].insert(0, 's')
+
+                category = info.get('category') or os.path.splitext(os.path.basename(filename))[1]
+                dataset_name = category
+                if dataset_name in dataSets:
+                    dataset_name = '{} ({})'.format(category, os.path.splitext(filename)[1].lstrip('.%$'))
+                dset['data'] = data
+                dset['sensors'] = info['ChannelName']
+                dset['units'] = info['ChannelUnit']
+                dset['name'] = dataset_name
+                if native_plot_data is not None:
+                    dset['_numpy_plot_data'] = native_plot_data
+                    dset['_numpy_plot_column_offset'] = 2 if has_time else 1
+                dataSets[dataset_name] = dset
+                continue
             
             if key in dataSets.keys():
                 # dataset with this length are already present, we concatenate
@@ -393,15 +418,18 @@ class BladedFile(File):
                     dset['_numpy_plot_data'] = native_plot_data
                     dset['_numpy_plot_column_offset'] = 2 if has_time else 1
 
-        # Check if we have "many" misc, if only one, replace by "Misc"
-        keyMisc = [k for k,v in dataSets.items() if v['name'].startswith('Misc_')]
-        if len(keyMisc)==1:
-            #dataSets[keyMisc[0]]['name']='Misc'
-            # We keep only one dataset for simplicity
-            self.dataSets= {'Misc': dataSets[keyMisc[0]]}
+        if is_project:
+            self.dataSets = dataSets
         else:
-            # Instead of using nMajor as key, we use the "name"
-            self.dataSets= {v['name']: v for (k, v) in dataSets.items()}
+            # Check if we have "many" misc, if only one, replace by "Misc"
+            keyMisc = [k for k,v in dataSets.items() if v['name'].startswith('Misc_')]
+            if len(keyMisc)==1:
+                #dataSets[keyMisc[0]]['name']='Misc'
+                # We keep only one dataset for simplicity
+                self.dataSets= {'Misc': dataSets[keyMisc[0]]}
+            else:
+                # Instead of using nMajor as key, we use the "name"
+                self.dataSets= {v['name']: v for (k, v) in dataSets.items()}
 
                 
     def toDataFrame(self):        
