@@ -73,6 +73,15 @@ class LazyFileEntry:
         return os.path.basename(self.path)
 
 
+@dataclass
+class SelectorPane:
+    frame: object
+    table_list_widget: object
+    column_filter: object
+    x_combo: object
+    y_list_widget: object
+
+
 class LazyLoadWorker(QtCore.QObject):
     finished = QtCore.Signal(int, int, object, str, float, str)
 
@@ -353,6 +362,19 @@ def _curve_pen(idx, width=1.25):
 
 def _selected_curve_pen(width=1.25):
     return pg.mkPen(color=(245, 158, 11), width=max(width + 2.0, 3.0))
+
+
+def _default_lazy_workers():
+    cpu_count = max(1, os.cpu_count() or 1)
+    env_value = os.environ.get("PYDATVIEW_MAX_WORKERS")
+    if env_value:
+        try:
+            return max(1, min(cpu_count, int(env_value)))
+        except ValueError:
+            print("[pyDatView] Ignoring invalid PYDATVIEW_MAX_WORKERS={!r}".format(env_value))
+    if sys.platform.startswith("win"):
+        return min(cpu_count, 8)
+    return min(cpu_count, 32)
 
 
 class NumericAxisItem(pg.AxisItem):
@@ -686,9 +708,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.lazy_loader_threads = {}
         self.lazy_loader_workers = {}
         self.lazy_generation = 0
-        self.lazy_max_workers = max(1, os.cpu_count() or 1)
+        self.lazy_max_workers = _default_lazy_workers()
         self.lazy_warning_backlog = []
         self.plot_after_lazy_load = False
+        self.selector_panes = []
 
         self._build_ui()
         self._connect()
@@ -717,6 +740,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.plot_type_combo.addItems(["Regular", "PDF", "FFT", "MinMax"])
         self.mode_combo = QtWidgets.QComboBox()
         self.mode_combo.addItems(["Overlay", "Subplots"])
+        self.compare_combo = QtWidgets.QComboBox()
+        self.compare_combo.addItems(["Auto", "2", "3"])
         self.live_plot = QtWidgets.QCheckBox("Live plot")
         self.live_plot.setChecked(True)
         self.grid_check = QtWidgets.QCheckBox("Grid")
@@ -731,11 +756,16 @@ class MainWindow(QtWidgets.QMainWindow):
         self.line_width_spin.setValue(1.25)
         self.marker_combo = QtWidgets.QComboBox()
         self.marker_combo.addItems(["None", "Circle", "Square", "Triangle", "Diamond"])
+        self.load_workers_combo = QtWidgets.QComboBox()
+        self.load_workers_combo.addItems(["Auto", "1", "2", "4", "8", "16", "32", "64", "96"])
+        self.load_workers_combo.setToolTip("Maximum parallel file load workers. Auto is capped on Windows to reduce UI hangs.")
         self.status_label = QtWidgets.QLabel("No files loaded")
         top.addWidget(QtWidgets.QLabel("Plot:"))
         top.addWidget(self.plot_type_combo)
         top.addWidget(QtWidgets.QLabel("Mode:"))
         top.addWidget(self.mode_combo)
+        top.addWidget(QtWidgets.QLabel("Compare:"))
+        top.addWidget(self.compare_combo)
         top.addWidget(self.live_plot)
         top.addWidget(self.grid_check)
         top.addWidget(self.logx_check)
@@ -745,6 +775,8 @@ class MainWindow(QtWidgets.QMainWindow):
         top.addWidget(self.line_width_spin)
         top.addWidget(QtWidgets.QLabel("Marker:"))
         top.addWidget(self.marker_combo)
+        top.addWidget(QtWidgets.QLabel("Load:"))
+        top.addWidget(self.load_workers_combo)
         top.addStretch(1)
         top.addWidget(self.status_label)
 
@@ -755,22 +787,9 @@ class MainWindow(QtWidgets.QMainWindow):
         side_layout = QtWidgets.QVBoxLayout(side)
         side_layout.setContentsMargins(0, 0, 0, 0)
 
-        side_layout.addWidget(QtWidgets.QLabel("Tables"))
-        self.table_list_widget = QtWidgets.QListWidget()
-        self.table_list_widget.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
-        side_layout.addWidget(self.table_list_widget, 2)
-
-        side_layout.addWidget(QtWidgets.QLabel("X column"))
-        self.column_filter = QtWidgets.QLineEdit()
-        self.column_filter.setPlaceholderText("Filter Y columns")
-        side_layout.addWidget(self.column_filter)
-        self.x_combo = QtWidgets.QComboBox()
-        side_layout.addWidget(self.x_combo)
-
-        side_layout.addWidget(QtWidgets.QLabel("Y columns"))
-        self.y_list_widget = QtWidgets.QListWidget()
-        self.y_list_widget.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
-        side_layout.addWidget(self.y_list_widget, 3)
+        self.selector_splitter = QtWidgets.QSplitter(QtCore.Qt.Vertical)
+        side_layout.addWidget(self.selector_splitter, 1)
+        self.set_compare_pane_count(1)
 
         button_row = QtWidgets.QHBoxLayout()
         self.plot_button = QtWidgets.QPushButton("Plot")
@@ -816,6 +835,59 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.setStatusBar(QtWidgets.QStatusBar())
         self._apply_light_borders()
+
+    def create_selector_pane(self, index):
+        frame = QtWidgets.QGroupBox("Set {}".format(index + 1))
+        layout = QtWidgets.QVBoxLayout(frame)
+        layout.setContentsMargins(6, 6, 6, 6)
+        layout.addWidget(QtWidgets.QLabel("Tables"))
+        table_list_widget = QtWidgets.QListWidget()
+        table_list_widget.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
+        layout.addWidget(table_list_widget, 2)
+        layout.addWidget(QtWidgets.QLabel("X column"))
+        column_filter = QtWidgets.QLineEdit()
+        column_filter.setPlaceholderText("Filter Y columns")
+        layout.addWidget(column_filter)
+        x_combo = QtWidgets.QComboBox()
+        layout.addWidget(x_combo)
+        layout.addWidget(QtWidgets.QLabel("Y columns"))
+        y_list_widget = QtWidgets.QListWidget()
+        y_list_widget.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
+        layout.addWidget(y_list_widget, 3)
+
+        pane = SelectorPane(frame, table_list_widget, column_filter, x_combo, y_list_widget)
+        table_list_widget.itemSelectionChanged.connect(self.on_table_selection_changed)
+        x_combo.currentIndexChanged.connect(self.on_selection_changed)
+        y_list_widget.itemSelectionChanged.connect(self.on_selection_changed)
+        column_filter.textChanged.connect(lambda _text, p=pane: self.populate_columns(p))
+        self.selector_splitter.addWidget(frame)
+        self.selector_panes.append(pane)
+        if index == 0:
+            self.table_list_widget = table_list_widget
+            self.column_filter = column_filter
+            self.x_combo = x_combo
+            self.y_list_widget = y_list_widget
+        return pane
+
+    def compare_pane_count(self):
+        text = self.compare_combo.currentText()
+        if text == "2":
+            return 2
+        if text == "3":
+            return 3
+        return 1
+
+    def set_compare_pane_count(self, count):
+        while len(self.selector_panes) < count:
+            self.create_selector_pane(len(self.selector_panes))
+        for i, pane in enumerate(self.selector_panes):
+            pane.frame.setTitle("Set {}".format(i + 1))
+            pane.frame.setVisible(i < count)
+        if self.selector_panes:
+            self.selector_splitter.setSizes([1] * count)
+
+    def visible_selector_panes(self):
+        return self.selector_panes[:self.compare_pane_count()]
 
     def _apply_light_borders(self):
         self.setStyleSheet("""
@@ -960,24 +1032,36 @@ class MainWindow(QtWidgets.QMainWindow):
         export_plot_action.triggered.connect(self.export_plot_image)
 
     def _connect(self):
-        self.table_list_widget.itemSelectionChanged.connect(self.on_table_selection_changed)
         self.plot_type_combo.currentIndexChanged.connect(self.on_selection_changed)
-        self.x_combo.currentIndexChanged.connect(self.on_selection_changed)
-        self.y_list_widget.itemSelectionChanged.connect(self.on_selection_changed)
         self.mode_combo.currentIndexChanged.connect(self.on_selection_changed)
+        self.compare_combo.currentIndexChanged.connect(self.on_compare_mode_changed)
         self.grid_check.stateChanged.connect(self.on_selection_changed)
         self.logx_check.stateChanged.connect(self.on_selection_changed)
         self.logy_check.stateChanged.connect(self.on_selection_changed)
         self.legend_check.stateChanged.connect(self.on_selection_changed)
         self.line_width_spin.valueChanged.connect(self.on_selection_changed)
         self.marker_combo.currentIndexChanged.connect(self.on_selection_changed)
-        self.column_filter.textChanged.connect(self.populate_columns)
+        self.load_workers_combo.currentIndexChanged.connect(self.update_lazy_worker_limit)
         self.canvas.curveSelected.connect(self.on_curve_selected)
         self.plot_button.clicked.connect(self.redraw)
         self.clear_button.clicked.connect(self.clear)
         self.select_all_y_button.clicked.connect(self.select_all_y)
         self.select_none_y_button.clicked.connect(self.select_none_y)
         self.load_selected_button.clicked.connect(self.load_selected_lazy_files)
+
+    def on_compare_mode_changed(self):
+        self.set_compare_pane_count(self.compare_pane_count())
+        self.populate_tables()
+        self.on_selection_changed()
+
+    def update_lazy_worker_limit(self):
+        text = self.load_workers_combo.currentText()
+        if text == "Auto":
+            self.lazy_max_workers = _default_lazy_workers()
+        else:
+            self.lazy_max_workers = max(1, min(max(1, os.cpu_count() or 1), int(text)))
+        self.statusBar().showMessage("Parallel file load workers: {}".format(self.lazy_max_workers), 8000)
+        self.start_next_lazy_load()
 
     def _show_file_format_errors(self):
         for err in self.file_format_errors:
@@ -1232,19 +1316,20 @@ class MainWindow(QtWidgets.QMainWindow):
         self.start_next_lazy_load()
 
     def is_lazy_selected(self, lazy_index):
-        for item in self.table_list_widget.selectedItems():
-            data = item.data(QtCore.Qt.UserRole)
-            if isinstance(data, tuple) and data == ("lazy", lazy_index):
-                return True
+        for pane in self.visible_selector_panes():
+            for item in pane.table_list_widget.selectedItems():
+                data = item.data(QtCore.Qt.UserRole)
+                if isinstance(data, tuple) and data == ("lazy", lazy_index):
+                    return True
         return False
 
     def update_lazy_item(self, lazy_index):
-        for row in range(self.table_list_widget.count()):
-            item = self.table_list_widget.item(row)
-            data = item.data(QtCore.Qt.UserRole)
-            if isinstance(data, tuple) and data == ("lazy", lazy_index):
-                item.setText(self.lazy_item_text(self.lazy_entries[lazy_index]))
-                return
+        for pane in self.selector_panes:
+            for row in range(pane.table_list_widget.count()):
+                item = pane.table_list_widget.item(row)
+                data = item.data(QtCore.Qt.UserRole)
+                if isinstance(data, tuple) and data == ("lazy", lazy_index):
+                    item.setText(self.lazy_item_text(self.lazy_entries[lazy_index]))
 
     def load_selected_lazy_files(self):
         lazy_indices = self.selected_lazy_indices()
@@ -1292,58 +1377,70 @@ class MainWindow(QtWidgets.QMainWindow):
             self.load_files(filenames, add=False)
 
     def populate_tables(self):
-        self.table_list_widget.blockSignals(True)
-        self.table_list_widget.clear()
-        if self.lazy_entries:
-            for i, entry in enumerate(self.lazy_entries):
-                item = QtWidgets.QListWidgetItem(self.lazy_item_text(entry))
-                item.setData(QtCore.Qt.UserRole, ("lazy", i))
-                self.table_list_widget.addItem(item)
-        else:
-            names = self.tab_list.getDisplayTabNames()
-            for i, tab in enumerate(self.tab_list):
-                item = QtWidgets.QListWidgetItem("{}  ({})".format(names[i], tab.shapestring))
-                item.setData(QtCore.Qt.UserRole, ("table", i))
-                self.table_list_widget.addItem(item)
-        if self.table_list_widget.count() > 0 and not self.lazy_entries:
-            self.table_list_widget.item(0).setSelected(True)
-        self.table_list_widget.blockSignals(False)
+        visible = self.visible_selector_panes()
+        names = self.tab_list.getDisplayTabNames() if not self.lazy_entries else []
+        for pane_index, pane in enumerate(visible):
+            pane.table_list_widget.blockSignals(True)
+            pane.table_list_widget.clear()
+            if self.lazy_entries:
+                for i, entry in enumerate(self.lazy_entries):
+                    item = QtWidgets.QListWidgetItem(self.lazy_item_text(entry))
+                    item.setData(QtCore.Qt.UserRole, ("lazy", i))
+                    pane.table_list_widget.addItem(item)
+            else:
+                for i, tab in enumerate(self.tab_list):
+                    item = QtWidgets.QListWidgetItem("{}  ({})".format(names[i], tab.shapestring))
+                    item.setData(QtCore.Qt.UserRole, ("table", i))
+                    pane.table_list_widget.addItem(item)
+            if pane.table_list_widget.count() > 0:
+                default_row = min(pane_index, pane.table_list_widget.count() - 1)
+                pane.table_list_widget.item(default_row).setSelected(True)
+            pane.table_list_widget.blockSignals(False)
         self.on_table_selection_changed()
 
-    def selected_lazy_indices(self):
-        items = self.table_list_widget.selectedItems()
+    def selected_lazy_indices(self, pane=None):
+        panes = [pane] if pane is not None else self.visible_selector_panes()
         indices = []
-        for item in items:
-            data = item.data(QtCore.Qt.UserRole)
-            if isinstance(data, tuple) and data[0] == "lazy":
-                indices.append(data[1])
+        for p in panes:
+            for item in p.table_list_widget.selectedItems():
+                data = item.data(QtCore.Qt.UserRole)
+                if isinstance(data, tuple) and data[0] == "lazy" and data[1] not in indices:
+                    indices.append(data[1])
         return indices
 
-    def selected_table_indices(self, load=True, show_warning=False):
-        items = self.table_list_widget.selectedItems()
+    def selected_table_indices(self, load=True, show_warning=False, pane=None):
+        panes = [pane] if pane is not None else self.visible_selector_panes()
         indices = []
-        for item in items:
-            data = item.data(QtCore.Qt.UserRole)
-            if isinstance(data, tuple) and data[0] == "table":
-                indices.append(data[1])
-            elif isinstance(data, tuple) and data[0] == "lazy":
-                entry = self.lazy_entries[data[1]]
-                if entry.loaded:
-                    indices.extend(entry.table_indices)
-                elif load:
-                    indices.extend(self.ensure_lazy_loaded(data[1], show_warning=show_warning))
+        for p in panes:
+            for item in p.table_list_widget.selectedItems():
+                data = item.data(QtCore.Qt.UserRole)
+                if isinstance(data, tuple) and data[0] == "table":
+                    if data[1] not in indices:
+                        indices.append(data[1])
+                elif isinstance(data, tuple) and data[0] == "lazy":
+                    entry = self.lazy_entries[data[1]]
+                    if entry.loaded:
+                        for table_index in entry.table_indices:
+                            if table_index not in indices:
+                                indices.append(table_index)
+                    elif load:
+                        for table_index in self.ensure_lazy_loaded(data[1], show_warning=show_warning):
+                            if table_index not in indices:
+                                indices.append(table_index)
         return indices
 
     def on_table_selection_changed(self):
-        self.populate_columns()
+        for pane in self.visible_selector_panes():
+            self.populate_columns(pane)
         self.update_table_preview()
         self.update_file_info()
         self.on_selection_changed()
 
-    def populate_columns(self):
-        previous_x = self.x_combo.currentData()
-        previous_y = set(self.selected_y_indices_original())
-        lazy_indices = self.selected_lazy_indices()
+    def populate_columns(self, pane=None):
+        pane = pane or self.selector_panes[0]
+        previous_x = pane.x_combo.currentData()
+        previous_y = set(self.selected_y_indices_original(pane))
+        lazy_indices = self.selected_lazy_indices(pane)
         indices = []
         columns = []
         if lazy_indices:
@@ -1355,26 +1452,26 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.ensure_lazy_header(lazy_index)
                 columns = list(entry.columns)
         if not lazy_indices:
-            indices = self.selected_table_indices(load=False)
+            indices = self.selected_table_indices(load=False, pane=pane)
         if not indices and len(self.tab_list) > 0 and not self.lazy_entries:
             indices = [0]
         if indices and not columns:
             columns = list(self.tab_list[indices[0]].columns)
         all_columns = [(i, str(col)) for i, col in enumerate(columns)]
-        text_filter = self.column_filter.text().strip().lower()
+        text_filter = pane.column_filter.text().strip().lower()
         visible_y = [(i, col) for i, col in all_columns
                      if not text_filter or text_filter in col.lower()]
 
-        self.x_combo.blockSignals(True)
-        self.y_list_widget.blockSignals(True)
-        self.x_combo.clear()
-        self.y_list_widget.clear()
+        pane.x_combo.blockSignals(True)
+        pane.y_list_widget.blockSignals(True)
+        pane.x_combo.clear()
+        pane.y_list_widget.clear()
         for original_i, col in all_columns:
-            self.x_combo.addItem(col, original_i)
+            pane.x_combo.addItem(col, original_i)
         for original_i, col in visible_y:
             item = QtWidgets.QListWidgetItem(col)
             item.setData(QtCore.Qt.UserRole, original_i)
-            self.y_list_widget.addItem(item)
+            pane.y_list_widget.addItem(item)
 
         if all_columns:
             all_indices = [i for i, _ in all_columns]
@@ -1382,18 +1479,18 @@ class MainWindow(QtWidgets.QMainWindow):
                 x_to_select = previous_x
             else:
                 x_to_select = next((i for i, col in all_columns if col.lower().startswith("time")), all_columns[0][0])
-            self.x_combo.setCurrentIndex(all_indices.index(x_to_select))
+            pane.x_combo.setCurrentIndex(all_indices.index(x_to_select))
         if visible_y and not previous_y:
-            x_current = self.x_combo.currentData()
+            x_current = pane.x_combo.currentData()
             default_row = next((row for row, (i, _) in enumerate(visible_y) if i != x_current), 0)
-            self.y_list_widget.item(default_row).setSelected(True)
+            pane.y_list_widget.item(default_row).setSelected(True)
         else:
-            for row in range(self.y_list_widget.count()):
-                item = self.y_list_widget.item(row)
+            for row in range(pane.y_list_widget.count()):
+                item = pane.y_list_widget.item(row)
                 if item.data(QtCore.Qt.UserRole) in previous_y:
                     item.setSelected(True)
-        self.x_combo.blockSignals(False)
-        self.y_list_widget.blockSignals(False)
+        pane.x_combo.blockSignals(False)
+        pane.y_list_widget.blockSignals(False)
 
     def on_selection_changed(self):
         if self.live_plot.isChecked() and not self.has_unloaded_lazy_selection():
@@ -1406,48 +1503,59 @@ class MainWindow(QtWidgets.QMainWindow):
         return False
 
     def select_all_y(self):
-        self.y_list_widget.blockSignals(True)
-        for row in range(self.y_list_widget.count()):
-            self.y_list_widget.item(row).setSelected(True)
-        self.y_list_widget.blockSignals(False)
+        for pane in self.visible_selector_panes():
+            pane.y_list_widget.blockSignals(True)
+            for row in range(pane.y_list_widget.count()):
+                pane.y_list_widget.item(row).setSelected(True)
+            pane.y_list_widget.blockSignals(False)
         self.on_selection_changed()
 
     def select_none_y(self):
-        self.y_list_widget.blockSignals(True)
-        for row in range(self.y_list_widget.count()):
-            self.y_list_widget.item(row).setSelected(False)
-        self.y_list_widget.blockSignals(False)
+        for pane in self.visible_selector_panes():
+            pane.y_list_widget.blockSignals(True)
+            for row in range(pane.y_list_widget.count()):
+                pane.y_list_widget.item(row).setSelected(False)
+            pane.y_list_widget.blockSignals(False)
         self.on_selection_changed()
 
-    def selected_y_indices(self):
-        return self.selected_y_indices_original()
+    def selected_y_indices(self, pane=None):
+        return self.selected_y_indices_original(pane)
 
-    def selected_y_indices_original(self):
-        return [item.data(QtCore.Qt.UserRole) for item in self.y_list_widget.selectedItems()]
+    def selected_y_indices_original(self, pane=None):
+        pane = pane or self.selector_panes[0]
+        return [item.data(QtCore.Qt.UserRole) for item in pane.y_list_widget.selectedItems()]
 
     def build_plot_data(self):
         plot_data = []
-        table_indices = self.selected_table_indices()
-        y_indices = self.selected_y_indices()
-        ix = self.x_combo.currentData()
-        if ix is None or not y_indices or not table_indices:
-            return plot_data
+        pane_payloads = []
+        total_table_count = 0
+        for pane_index, pane in enumerate(self.visible_selector_panes()):
+            table_indices = self.selected_table_indices(pane=pane)
+            y_indices = self.selected_y_indices(pane)
+            ix = pane.x_combo.currentData()
+            if ix is None or not y_indices or not table_indices:
+                continue
+            pane_payloads.append((pane_index, table_indices, y_indices, ix))
+            total_table_count += len(table_indices)
 
-        same_col = len(table_indices) > 1
-        for it in table_indices:
-            tab = self.tab_list[it]
-            for iy in y_indices:
-                if iy >= len(tab.columns):
+        same_col = total_table_count > 1 or len(pane_payloads) > 1
+        for pane_index, table_indices, y_indices, ix in pane_payloads:
+            for it in table_indices:
+                tab = self.tab_list[it]
+                if ix >= len(tab.columns):
                     continue
-                idx = (it, ix, iy, str(tab.columns[ix]), str(tab.columns[iy]), tab.active_name)
-                pd = PlotData()
-                pd.fromIDs(self.tab_list, len(plot_data), idx, same_col, pipeline=None)
-                self.apply_plot_type(pd)
-                if len(table_indices) == 1:
-                    pd.syl = pd.sy
-                else:
-                    pd.syl = "{} - {}".format(pd.st, pd.sy)
-                plot_data.append(pd)
+                for iy in y_indices:
+                    if iy >= len(tab.columns):
+                        continue
+                    idx = (it, ix, iy, str(tab.columns[ix]), str(tab.columns[iy]), tab.active_name)
+                    pd = PlotData()
+                    pd.fromIDs(self.tab_list, len(plot_data), idx, same_col, pipeline=None)
+                    self.apply_plot_type(pd)
+                    if same_col:
+                        pd.syl = "Set {}: {} - {}".format(pane_index + 1, pd.st, pd.sy)
+                    else:
+                        pd.syl = pd.sy
+                    plot_data.append(pd)
         return plot_data
 
     def apply_plot_type(self, pd):
