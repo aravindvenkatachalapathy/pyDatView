@@ -360,12 +360,36 @@ def _finite_xy(x, y):
     return x[finite], y[finite]
 
 
+_PLOT_PALETTE = (
+    (0, 87, 184),     # blue
+    (209, 73, 0),     # vermilion
+    (0, 135, 90),     # green
+    (180, 35, 24),    # red
+    (111, 66, 193),   # purple
+    (0, 124, 145),    # teal
+    (194, 24, 91),    # magenta
+    (138, 90, 0),     # ochre
+    (29, 78, 216),    # royal blue
+    (162, 59, 114),   # berry
+    (46, 125, 50),    # dark green
+    (109, 76, 65),    # brown
+    (0, 96, 100),     # dark cyan
+    (156, 39, 176),   # violet
+    (230, 81, 0),     # burnt orange
+    (55, 65, 81),     # charcoal
+)
+
+
+def _curve_color(idx):
+    return _PLOT_PALETTE[idx % len(_PLOT_PALETTE)]
+
+
 def _curve_pen(idx, width=1.25):
-    return pg.mkPen(color=pg.intColor(idx, hues=12, values=1, maxValue=220), width=width)
+    return pg.mkPen(color=_curve_color(idx), width=width)
 
 
 def _selected_curve_pen(width=1.25):
-    return pg.mkPen(color=(245, 158, 11), width=max(width + 2.0, 3.0))
+    return pg.mkPen(color=(17, 24, 39), width=max(width + 2.5, 3.5))
 
 
 def _default_lazy_workers():
@@ -647,6 +671,7 @@ class QtPlotCanvas(pg.GraphicsLayoutWidget):
                     continue
                 if len(x) == 0:
                     continue
+                curve_color = _curve_color(curve_idx)
                 item = plot.plot(
                     x,
                     y,
@@ -654,7 +679,8 @@ class QtPlotCanvas(pg.GraphicsLayoutWidget):
                     pen=_curve_pen(curve_idx, width=line_width),
                     symbol=marker,
                     symbolSize=5 if marker else None,
-                    symbolBrush=pg.intColor(curve_idx, hues=12, values=1, maxValue=220) if marker else None,
+                    symbolBrush=curve_color if marker else None,
+                    symbolPen=pg.mkPen(curve_color) if marker else None,
                     skipFiniteCheck=True,
                 )
                 item.setClipToView(True)
