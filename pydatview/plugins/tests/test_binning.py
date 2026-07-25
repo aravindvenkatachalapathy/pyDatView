@@ -1,19 +1,19 @@
 import unittest
+
 import numpy as np
 
-from pydatview.plugins.base_plugin import demoPlotDataActionPanel, HAS_WX
-from pydatview.plugins.plotdata_binning import *
-from pydatview.plugins.plotdata_binning import _DEFAULT_DICT
+from pydatview.plugins.plotdata_binning import bin_plot, binningAction
+
 
 class TestBinning(unittest.TestCase):
+    def test_headless_action(self):
+        opts = {"active": False, "xMin": 0.0, "xMax": 10.0, "nBins": 2}
+        action = binningAction(data=opts)
+        self.assertIsNone(action.guiEditorClass)
+        x_new, y_new = bin_plot(np.arange(10.0), np.arange(10.0), opts)
+        self.assertEqual(len(x_new), 2)
+        self.assertEqual(y_new.shape, x_new.shape)
 
-    def test_showGUI(self):
-        if HAS_WX:
-            demoPlotDataActionPanel(BinningToolPanel, plotDataFunction=bin_plot, data=_DEFAULT_DICT, tableFunctionAdd=binTabAdd, mainLoop=False, title='Binning')
-        else:
-            print('[WARN] skipping test because wx is not available.')
 
-
-if __name__ == '__main__':
+if __name__ == "__main__":
     unittest.main()
-

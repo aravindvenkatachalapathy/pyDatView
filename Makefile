@@ -1,23 +1,6 @@
-# --- Detecting OS
-ifeq '$(findstring ;,$(PATH))' ';'
-    detected_OS := Windows
-else
-    detected_OS := $(shell uname 2>/dev/null || echo Unknown)
-    detected_OS := $(patsubst CYGWIN%,Cygwin,$(detected_OS))
-    detected_OS := $(patsubst MSYS%,MSYS,$(detected_OS))
-    detected_OS := $(patsubst MINGW%,MSYS,$(detected_OS))
-endif
-
 testfile= example_files/FASTIn_arf_coords.txt
 all:
-ifeq ($(detected_OS),Darwin)        # Mac OS X
-	./pythonmac pyDatView.py $(testfile)
-else
 	python pyDatView.py $(testfile)
-endif
-
-
-
 
 deb:
 	python DEBUG.py
@@ -26,7 +9,7 @@ install:
 	python setup.py install
 
 dep:
-	python -m pip install -r requirements.txt
+	python -m pip install -e .
 
 pull:
 	git pull --recurse-submodules
@@ -42,27 +25,8 @@ help:
 	@echo "   test       run the unit tests " 
 
 test:
-ifeq ($(detected_OS),Darwin)        # Mac OS X
-	./pythonmac -m unittest discover -v tests
-	./pythonmac -m unittest discover -v pydatview/plugins/tests
-else
 	python -m unittest discover -v tests
 	python -m unittest discover -v pydatview/plugins/tests
-endif
-
-prof:
-	python -m cProfile -o tests/prof_all.prof  tests/prof_all.py
-	python -m pyprof2calltree -i tests/prof_all.prof -o tests/callgrind.prof_all.prof
-	snakeviz tests/prof_all.prof
-	#viztracer  .\tests\prof_all.py
-	#vizviewer.exe .\result.json
-
-
-exe:
-	python -m nuitka --follow-imports --include-plugin-directory --include-plugin-files --show-progress --show-modules --output-dir=build-nuitka pyDatView.py
-
-exestd:
-	python -m nuitka --python-flag=no_site --assume-yes-for-downloads --standalone --follow-imports --include-plugin-directory --include-plugin-files --show-progress --show-modules --output-dir=build-nuitka-std pyDatView.py
 
 clean:
 	rm -rf __pycache__
@@ -73,7 +37,7 @@ clean:
 	
 
 pyexe:
-	pyinstaller --onedir pyDatView.py
+	python -m PyInstaller --noconfirm --clean --windowed --onedir --name pyDatView --icon ressources/pyDatView.ico --add-data "ressources:ressources" pyDatView.py
 
 version:
 ifeq ($(OS),Windows_NT)
@@ -82,8 +46,5 @@ else
 	@sh _tools/setVersion.sh
 endif
 
-installer: 
-	python -m nsist installer.cfg
-
-
+installer: pyexe
 

@@ -667,7 +667,7 @@ class PlotData():
     # --- Measure - TODO: cleanup
     # --------------------------------------------------------------------------------{
     def ymeas1(PD):
-        # NOTE: calculation happens in GUIMeasure..
+        # NOTE: calculation happens in the measurement controller.
         if PD.xyMeas[0][0] is not None:
             yv = PD.xyMeas[0][1]
             if PD.yIsString:
@@ -680,7 +680,7 @@ class PlotData():
             return np.nan, 'NA'
 
     def ymeas2(PD):
-        # NOTE: calculation happens in GUIMeasure..
+        # NOTE: calculation happens in the measurement controller.
         if PD.xyMeas[1][0] is not None:
             yv = PD.xyMeas[1][1]
             if PD.yIsString:
@@ -994,4 +994,3 @@ def compareMultiplePD(PD, mode, sComp):
         PD_comp=[]
 
     return PD_comp
-

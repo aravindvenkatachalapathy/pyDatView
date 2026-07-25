@@ -18,6 +18,7 @@ _tools/*
 _*.bat
 _*
 !__init__.py
+!__main__.py
 *.png
 tags
 *.DS_Store

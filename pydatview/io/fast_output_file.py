@@ -160,9 +160,9 @@ class FASTOutputFile(File):
             cols=info['attribute_names']
         self.description = info.get('description', '')
         self.description = ''.join(self.description) if isinstance(self.description,list) else self.description
-        if info.get('loader_backend') == 'rust' and isinstance(self.data, np.ndarray):
+        if info.get('loader_backend') and isinstance(self.data, np.ndarray):
             self._numpy_plot_data = self.data
-            self._loader_backend = 'Rust'
+            self._loader_backend = str(info['loader_backend'])
         if isinstance(self.data, pd.DataFrame):
             self.data.columns = cols
         else:
@@ -382,7 +382,7 @@ def isBinary(filename):
 
 
 
-def load_ascii_output(filename, method='numpy', encoding='ascii', **kwargs):
+def load_ascii_output(filename, method='numpy', encoding='ascii', channel_indices=None, **kwargs):
 
 
     if method in ['forLoop','pandas']:
@@ -405,7 +405,12 @@ def load_ascii_output(filename, method='numpy', encoding='ascii', **kwargs):
                 f.close()
                 encoding=''
                 print('[WARN] Attempt to re-read the file with encoding utf-16')
-                return load_ascii_output(filename=filename, method=method, encoding='utf-16')
+                return load_ascii_output(
+                    filename=filename,
+                    method=method,
+                    encoding='utf-16',
+                    channel_indices=channel_indices,
+                )
             first_word = (l+' dummy').lower().split()[0]
             in_header=  (first_word != 'time') and  (first_word != 'alpha')
             if in_header:
@@ -421,11 +426,27 @@ def load_ascii_output(filename, method='numpy', encoding='ascii', **kwargs):
 
         nHeader = len(header)+1
         nCols = len(info['attribute_names'])
+        if channel_indices is not None:
+            channel_indices = list(dict.fromkeys(int(i) for i in channel_indices))
+            if not channel_indices:
+                raise ValueError('At least one OpenFAST channel must be selected')
+            if min(channel_indices) < 0 or max(channel_indices) >= nCols:
+                raise IndexError('OpenFAST channel index is outside the file header')
+            info['attribute_names'] = [info['attribute_names'][i] for i in channel_indices]
+            info['attribute_units'] = [info['attribute_units'][i] for i in channel_indices]
 
         if method=='numpy':
             # The most efficient, and will remove empty lines and the lines that starts with "This"
             #  ("This" is found at the end of some Hydro Out files..)
-            data = np.loadtxt(f, comments=('This'))
+            data = np.loadtxt(
+                f,
+                comments=('This'),
+                usecols=channel_indices,
+                ndmin=2,
+            )
+            if channel_indices is not None:
+                info['loader_backend'] = 'NumPy selected'
+                print('[pyDatView] OpenFAST ASCII selected-channel load: Python/NumPy ({})'.format(filename))
 
         elif method =='pandas':
             # Could probably be made more efficient, but 
@@ -453,16 +474,157 @@ def load_ascii_output(filename, method='numpy', encoding='ascii', **kwargs):
         else:
             raise NotImplementedError()
 
+        if channel_indices is not None and method != 'numpy':
+            data = np.asarray(data)[:, channel_indices]
+
     return data, info
 
 
-def load_binary_output(filename, use_buffer=False, method='mix', use_rust=True, **kwargs):
+def _load_binary_output_selected(filename, channel_indices):
+    """Read selected OpenFAST channels without materializing the full matrix."""
+    def read_array(fid, dtype, count):
+        values = np.fromfile(fid, dtype=dtype, count=count)
+        if values.size != count:
+            raise IOError(
+                'Unexpected end of OpenFAST binary file while reading {} values'.format(count)
+            )
+        return values
+
+    selected = list(dict.fromkeys(int(i) for i in channel_indices))
+    if not selected:
+        raise ValueError('At least one OpenFAST channel must be selected')
+
+    with open(filename, 'rb') as fid:
+        file_id = int(read_array(fid, '<i2', 1)[0])
+        if file_id not in [
+            FileFmtID_WithTime,
+            FileFmtID_WithoutTime,
+            FileFmtID_NoCompressWithoutTime,
+            FileFmtID_ChanLen_In,
+        ]:
+            raise ValueError(
+                'FileID not supported {}. Is it a FAST binary file?'.format(file_id)
+            )
+
+        len_name = (
+            int(read_array(fid, '<i2', 1)[0])
+            if file_id == FileFmtID_ChanLen_In
+            else 10
+        )
+        num_out_chans = int(read_array(fid, '<i4', 1)[0])
+        nt = int(read_array(fid, '<i4', 1)[0])
+        if min(selected) < 0 or max(selected) > num_out_chans:
+            raise IndexError('OpenFAST channel index is outside the file header')
+
+        if file_id == FileFmtID_WithTime:
+            time_scl, time_off = read_array(fid, '<f8', 2)
+            time_out1 = time_incr = None
+        else:
+            time_out1, time_incr = read_array(fid, '<f8', 2)
+            time_scl = time_off = None
+
+        if file_id == FileFmtID_NoCompressWithoutTime:
+            col_scl = np.ones(num_out_chans, dtype=np.float64)
+            col_off = np.zeros(num_out_chans, dtype=np.float64)
+            packed_dtype = np.dtype('<f8')
+        else:
+            col_scl = read_array(fid, '<f4', num_out_chans).astype(np.float64)
+            col_off = read_array(fid, '<f4', num_out_chans).astype(np.float64)
+            packed_dtype = np.dtype('<i2')
+
+        len_desc = int(read_array(fid, '<i4', 1)[0])
+        desc = bytes(read_array(fid, np.uint8, len_desc)).decode(
+            'ascii', errors='ignore'
+        ).strip()
+        names = [
+            bytes(read_array(fid, np.uint8, len_name)).decode(
+                'ascii', errors='ignore'
+            ).strip()
+            for _ in range(num_out_chans + 1)
+        ]
+        units = [
+            bytes(read_array(fid, np.uint8, len_name)).decode(
+                'ascii', errors='ignore'
+            ).strip()[1:-1]
+            for _ in range(num_out_chans + 1)
+        ]
+
+        packed_time = None
+        if file_id == FileFmtID_WithTime:
+            if 0 in selected:
+                packed_time = read_array(fid, '<i4', nt)
+            else:
+                fid.seek(nt * np.dtype('<i4').itemsize, os.SEEK_CUR)
+        data_offset = fid.tell()
+
+    data = np.empty((nt, len(selected)), dtype=np.float64)
+    output_positions = []
+    packed_columns = []
+    for output_index, channel_index in enumerate(selected):
+        if channel_index == 0:
+            if file_id == FileFmtID_WithTime:
+                data[:, output_index] = (packed_time - time_off) / time_scl
+            else:
+                data[:, output_index] = time_out1 + time_incr * np.arange(nt)
+        else:
+            output_positions.append(output_index)
+            packed_columns.append(channel_index - 1)
+
+    if packed_columns:
+        packed = np.memmap(
+            filename,
+            dtype=packed_dtype,
+            mode='r',
+            offset=data_offset,
+            shape=(nt, num_out_chans),
+            order='C',
+        )
+        packed_selected = np.asarray(
+            packed[:, packed_columns],
+            dtype=np.float64,
+        )
+        scales = col_scl[packed_columns]
+        offsets = col_off[packed_columns]
+        scaled = (packed_selected - offsets) / scales
+        invalid = np.isnan(scales) & np.isnan(offsets)
+        if np.any(invalid):
+            scaled[:, invalid] = 0.0
+        data[:, output_positions] = scaled
+        del packed
+
+    info = {
+        'name': os.path.splitext(os.path.basename(filename))[0],
+        'description': desc,
+        'fileID': file_id,
+        'attribute_names': [names[i] for i in selected],
+        'attribute_units': [units[i] for i in selected],
+        'loader_backend': 'NumPy selected',
+    }
+    print(
+        '[pyDatView] OpenFAST binary selected-channel load: Python/NumPy memmap '
+        '({}; {} of {} channels)'.format(
+            filename, len(selected), num_out_chans + 1
+        )
+    )
+    return data, info
+
+
+def load_binary_output(
+        filename,
+        use_buffer=False,
+        method='mix',
+        use_rust=True,
+        channel_indices=None,
+        **kwargs):
     """
     03/09/15: Ported from ReadFASTbinary.m by Mads M Pedersen, DTU Wind
     24/10/18: Low memory/buffered version by E. Branlard, NREL
     18/01/19: New file format for extended channels, by E. Branlard, NREL
     20/11/23: Improved performances using np.fromfile, by E. Branlard, NREL
     """
+    if channel_indices is not None:
+        return _load_binary_output_selected(filename, channel_indices)
+
     if use_rust and pydatview_fastio is not None and not use_buffer:
         try:
             data, info = pydatview_fastio.read_fast_outb(filename)

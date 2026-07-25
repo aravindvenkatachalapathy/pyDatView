@@ -4,7 +4,6 @@ import os
 import platform
 import datetime
 import re
-import inspect
 import traceback
 
 
@@ -12,35 +11,6 @@ class PyDatViewException(Exception):
     pass
 
 
-CHAR={
-'menu'     : u'\u2630',
-'tridot'   : u'\u26EC',
-'apply'    : u'\u1809',
-'compute'  : u'\u2699', # gear
-'close'    : u'\u274C',
-'add'      : u'\u2795',
-'add_small': u'\ufe62',
-'clear'    : u'-',
-'sun'      : u'\u2600',
-'suncloud' : u'\u26C5',
-'cloud'    : u'\u2601',
-'check'    : u'\u2714',
-'help'     : u'\u2753',
-'pencil'   : u'\u270f', # draw
-'pick'     : u'\u26cf',
-'downarrow': u'\u2193',
-'update'   : u'\u27F3',
-# 'update'   : u'\u21BB',
-# 'update'   : u'\U0001F5D8',
-'save'     : u'\U0001F5AB',
-'hammer'   : u'\U0001f528',
-'wrench'   : u'\U0001f527',
-'ruler'    : u'\U0001F4CF', # measure
-'control_knobs'    : u'\U0001F39b', 
-'python'   : u'\U0001F40D',
-'chart'    : u'\U0001F4c8',
-'chart_small': u'\U0001F5e0',
-}
 # --------------------------------------------------------------------------------}
 # --- ellude
 # --------------------------------------------------------------------------------{
@@ -435,31 +405,6 @@ def has_chinese_char(s):
     return False
 
 
-# --------------------------------------------------------------------------------}
-# --- Helper functions
-# --------------------------------------------------------------------------------{
-def YesNo(parent, question, caption = 'Yes or no?'):
-    import wx
-    dlg = wx.MessageDialog(parent, question, caption, wx.YES_NO | wx.ICON_QUESTION)
-    result = dlg.ShowModal() == wx.ID_YES
-    dlg.Destroy()
-    return result
-def Info(parent, message, caption = 'Info'):
-    import wx
-    dlg = wx.MessageDialog(parent, message, caption, wx.OK | wx.ICON_INFORMATION)
-    dlg.ShowModal()
-    dlg.Destroy()
-def Warn(parent, message, caption = 'Warning!'):
-    import wx
-    dlg = wx.MessageDialog(parent, message, caption, wx.OK | wx.ICON_WARNING)
-    dlg.ShowModal()
-    dlg.Destroy()
-def Error(parent, message, caption = 'Error!'):
-    import wx
-    dlg = wx.MessageDialog(parent, message, caption, wx.OK | wx.ICON_ERROR)
-    dlg.ShowModal()
-    dlg.Destroy()
-
 def exception2string(excp, iMax=40, prefix='    | ', prevStack=True):
     if isinstance(excp, PyDatViewException):
         return prefix + excp.args[0]
@@ -519,19 +464,6 @@ def isDate(x):
 
 def isDateScalar(x):
     return np.issubdtype(x, np.datetime64)
-
-
-
-# Create a Dummy Main Frame Class for testing purposes (e.g. of plugins)
-
-class DummyMainFrame():
-    def __init__(self, parent): self.parent=parent; 
-    def addAction            (self, *args, **kwargs): Info(self.parent, 'This is dummy '+inspect.stack()[0][3])
-    def removeAction         (self, *args, **kwargs): Info(self.parent, 'This is dummy '+inspect.stack()[0][3])
-    def load_dfs             (self, *args, **kwargs): Info(self.parent, 'This is dummy '+inspect.stack()[0][3])
-    def mainFrameUpdateLayout(self, *args, **kwargs): Info(self.parent, 'This is dummy '+inspect.stack()[0][3])
-    def redraw               (self, *args, **kwargs): Info(self.parent, 'This is dummy '+inspect.stack()[0][3])
-
 
 if __name__ == '__main__':
     try:

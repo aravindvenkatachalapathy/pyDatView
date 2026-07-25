@@ -90,10 +90,11 @@ class TableList(object): # todo inherit list
         # Loop through files, appending tables within files
         warnList=[]
         newTabs=[]
+        opened_filenames=set(self.unique_filenames)
         for i, (f,ff) in enumerate(zip(filenames, fileformats)):
             if statusFunction is not None:
                 statusFunction(i)
-            if f in self.unique_filenames:
+            if f in opened_filenames:
                 warnList.append('Warn: Cannot add a file already opened ' + f)
             elif len(f)==0:
                 pass
@@ -104,10 +105,17 @@ class TableList(object): # todo inherit list
                     warnList.append(warnloc)
                 self.append(tabs)
                 newTabs +=tabs
+                if tabs:
+                    opened_filenames.add(f)
         
         return newTabs, warnList
 
-    def _load_file_tabs(self, filename, fileformat=None, bReload=False):
+    def _load_file_tabs(
+            self,
+            filename,
+            fileformat=None,
+            bReload=False,
+            channel_indices=None):
         """ load a single file, returns a list (often of size one) of tables """
         # Returning a list of tables 
         tabs=[]
@@ -119,7 +127,13 @@ class TableList(object): # todo inherit list
         fileformatAllowedToFailOnReload = (fileformat is not None) and bReload
         if fileformatAllowedToFailOnReload:
             try:
-                F = fileformat.constructor(filename=filename)
+                constructor_kwargs = {'filename': filename}
+                if (
+                    channel_indices is not None
+                    and fileformat.name == 'FAST output file'
+                ):
+                    constructor_kwargs['channel_indices'] = channel_indices
+                F = fileformat.constructor(**constructor_kwargs)
                 dfs = F.toDataFrame()
             except:
                 warnLoc = 'Failed to read file:\n\n   {}\n\nwith fileformat: {}\n\nIf you see this message, the reader tried again and succeeded with "auto"-fileformat.\n\n'.format(filename, fileformat.name)
@@ -136,7 +150,13 @@ class TableList(object): # todo inherit list
                     fileformat, F = weio.detectFormat(filename)
                 # Reading the file with the appropriate class if necessary
                 if not isinstance(F, fileformat.constructor):
-                    F=fileformat.constructor(filename=filename)
+                    constructor_kwargs = {'filename': filename}
+                    if (
+                        channel_indices is not None
+                        and fileformat.name == 'FAST output file'
+                    ):
+                        constructor_kwargs['channel_indices'] = channel_indices
+                    F=fileformat.constructor(**constructor_kwargs)
                 dfs = F.toDataFrame()
             except weio.FileNotFoundError as e:
                 warn = 'Error: A file was not found!\n\n While opening:\n\n {}\n\n the following file was not found:\n\n {}\n'.format(filename, e.filename)
@@ -1078,5 +1098,3 @@ if __name__ == '__main__':
     import pandas as pd;
     from Tables import Table
     import numpy as np
-
-

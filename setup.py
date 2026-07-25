@@ -1,15 +1,29 @@
-from setuptools import setup
+from setuptools import find_packages, setup
 
 setup(
     name='pydatview',
     version='0.5',
-    description='GUI to display tabulated data from files or pandas dataframes',
-    url='http://github.com/ebranlard/pyDatView/',
+    description='Qt GUI to load, compare, and plot engineering data',
+    url='https://github.com/aravindvenkatachalapathy/pyDatView',
     author='Emmanuel Branlard',
     author_email='lastname@gmail.com',
     license='MIT',
     python_requires='>=3.9',
-    packages=['pydatview'],
+    packages=find_packages(
+        include=['pydatview', 'pydatview.*'],
+        exclude=['pydatview.plugins.tests', 'pydatview.plugins.tests.*'],
+    ),
+    data_files=[
+        ('ressources', ['ressources/pyDatView.ico']),
+        (
+            'ressources/icons',
+            [
+                'ressources/icons/chart.svg',
+                'ressources/icons/filesave.svg',
+                'ressources/icons/scan.png',
+            ],
+        ),
+    ],
     install_requires=[
         'openpyxl',
         'numpy',
@@ -24,7 +38,13 @@ setup(
         'pyqtgraph',
     ],
     extras_require={
-        'legacy_wx': ['wxpython'],
+        'build': ['pyinstaller>=6'],
+        'rust-build': ['maturin>=1.4,<2'],
+    },
+    entry_points={
+        'gui_scripts': [
+            'pydatview=pydatview.qt_main:cmdline',
+        ],
     },
     zip_safe=False
 )

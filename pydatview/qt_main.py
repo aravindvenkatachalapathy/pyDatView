@@ -1,20 +1,22 @@
 """PySide6/PyQtGraph pyDatView application.
 
-This is the migrated primary GUI path. It reuses pyDatView's existing IO,
-TableList, and PlotData data model, while replacing the wx/matplotlib UI and
-plotting surface with Qt widgets and PyQtGraph.
+This is the primary GUI path. It reuses pyDatView's existing IO, TableList,
+and PlotData data model with Qt widgets and PyQtGraph.
 """
 
+import ast
 import os
 import re
 import sys
 import time
 import traceback
+from collections import deque
 from dataclasses import dataclass, field
 
 import numpy as np
 
 from pydatview.Tables import TableList
+from pydatview.common import no_unit
 from pydatview.plotdata import PlotData, PDL_xlabel
 import pydatview.io as weio
 
@@ -63,6 +65,8 @@ class LazyFileEntry:
     loading: bool = False
     columns: list = field(default_factory=list)
     header_attempted: bool = False
+    loaded_column_indices: set = field(default_factory=set)
+    full_loaded: bool = False
 
     @property
     def loaded(self):
@@ -85,24 +89,45 @@ class SelectorPane:
 
 
 class LazyLoadWorker(QtCore.QObject):
-    finished = QtCore.Signal(int, int, object, str, float, str)
+    finished = QtCore.Signal(int, int, object, str, float, str, object)
 
-    def __init__(self, generation, lazy_index, path, file_format, options):
+    def __init__(
+            self,
+            generation,
+            lazy_index,
+            path,
+            file_format,
+            options,
+            channel_indices=None):
         super().__init__()
         self.generation = generation
         self.lazy_index = lazy_index
         self.path = path
         self.file_format = file_format
         self.options = dict(options)
+        self.channel_indices = channel_indices
 
     @QtCore.Slot()
     def run(self):
         t0 = time.perf_counter()
         try:
             loader = TableList(options=self.options)
-            tabs, warning = loader._load_file_tabs(self.path, fileformat=self.file_format, bReload=False)
+            selective = (
+                self.channel_indices is not None
+                and getattr(self.file_format, "name", "") == "FAST output file"
+            )
+            tabs, warning = loader._load_file_tabs(
+                self.path,
+                fileformat=self.file_format,
+                bReload=False,
+                channel_indices=self.channel_indices if selective else None,
+            )
+            loaded_column_indices = (
+                list(self.channel_indices) if selective else None
+            )
         except Exception as exc:
             tabs = []
+            loaded_column_indices = self.channel_indices
             warning = "Error: Failed to open file:\n\n {}\n\n{}: {}\n".format(
                 self.path, type(exc).__name__, exc
             )
@@ -113,11 +138,17 @@ class LazyLoadWorker(QtCore.QObject):
             warning or "",
             time.perf_counter() - t0,
             getattr(self.file_format, "name", "auto"),
+            loaded_column_indices,
         )
 
 
 def _resource_path(*parts):
-    return os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "ressources", *parts))
+    source_path = os.path.abspath(
+        os.path.join(os.path.dirname(__file__), "..", "ressources", *parts)
+    )
+    if os.path.exists(source_path):
+        return source_path
+    return os.path.join(sys.prefix, "ressources", *parts)
 
 
 def _format_columns(names, units):
@@ -255,10 +286,12 @@ def _indexed_format_entries(format_entries, bladed_suffixes=None):
     for fmt, specs in format_entries:
         if not specs:
             continue
-        if getattr(fmt, "name", "") == "Bladed output file" and bladed_suffixes:
-            for suffix in bladed_suffixes:
-                for prefix in (".$", ".%", "."):
-                    suffix_formats.setdefault(prefix + suffix, fmt)
+        if getattr(fmt, "name", "") == "Bladed output file":
+            if bladed_suffixes:
+                for suffix in bladed_suffixes:
+                    suffix_formats.setdefault(".$" + suffix, fmt)
+            else:
+                suffix_formats.setdefault(".$pj", fmt)
             continue
         for kind, value in specs:
             if kind == "suffix":
@@ -360,6 +393,165 @@ def _finite_xy(x, y):
     return x[finite], y[finite]
 
 
+def _plot_ready_xy(x, y, logx=False, logy=False):
+    x, y = _finite_xy(x, y)
+    if not logx and not logy:
+        return x, y
+    valid = np.ones(len(x), dtype=bool)
+    if logx:
+        valid &= x > 0
+    if logy:
+        valid &= y > 0
+    if valid.all():
+        return x, y
+    return x[valid], y[valid]
+
+
+_MATH_FUNCTIONS = {
+    "abs": np.abs,
+    "sqrt": np.sqrt,
+    "sin": np.sin,
+    "cos": np.cos,
+    "tan": np.tan,
+    "arcsin": np.arcsin,
+    "arccos": np.arccos,
+    "arctan": np.arctan,
+    "exp": np.exp,
+    "log": np.log,
+    "log10": np.log10,
+    "minimum": np.minimum,
+    "maximum": np.maximum,
+    "clip": np.clip,
+    "where": np.where,
+    "gradient": np.gradient,
+    "degrees": np.degrees,
+    "radians": np.radians,
+    "mean": np.mean,
+    "std": np.std,
+}
+_MATH_CONSTANTS = {"pi": np.pi, "e": np.e}
+_MATH_AST_NODES = (
+    ast.Expression,
+    ast.BinOp,
+    ast.UnaryOp,
+    ast.Call,
+    ast.Name,
+    ast.Load,
+    ast.Constant,
+    ast.Compare,
+    ast.Add,
+    ast.Sub,
+    ast.Mult,
+    ast.Div,
+    ast.FloorDiv,
+    ast.Mod,
+    ast.Pow,
+    ast.BitAnd,
+    ast.BitOr,
+    ast.UAdd,
+    ast.USub,
+    ast.Eq,
+    ast.NotEq,
+    ast.Lt,
+    ast.LtE,
+    ast.Gt,
+    ast.GtE,
+)
+
+
+def _column_array(dataframe, column):
+    series = dataframe[column]
+    try:
+        return series.to_numpy(copy=False)
+    except TypeError:
+        return series.to_numpy()
+    except AttributeError:
+        return np.asarray(series)
+
+
+def _resolve_expression_column(dataframe, token):
+    token = token.strip()
+    columns = [str(column) for column in dataframe.columns]
+    exact_matches = [column for column in columns if column == token]
+    if len(exact_matches) == 1:
+        return exact_matches[0]
+    if len(exact_matches) > 1:
+        raise ValueError("Column name is ambiguous: {}".format(token))
+    matches = [column for column in columns if no_unit(column).strip() == token]
+    if len(matches) == 1:
+        return matches[0]
+    if not matches:
+        raise ValueError("Column not found: {}".format(token))
+    raise ValueError("Column name is ambiguous: {}".format(token))
+
+
+def evaluate_math_expression(dataframe, expression):
+    expression = expression.strip()
+    if not expression:
+        raise ValueError("Expression is empty")
+
+    namespace = dict(_MATH_FUNCTIONS)
+    namespace.update(_MATH_CONSTANTS)
+    columns = [str(column) for column in dataframe.columns]
+
+    identifier_columns = {}
+    for column in columns:
+        for candidate in (column, no_unit(column).strip()):
+            if candidate.isidentifier() and candidate not in namespace:
+                identifier_columns.setdefault(candidate, []).append(column)
+    for identifier, matches in identifier_columns.items():
+        unique_matches = list(dict.fromkeys(matches))
+        if len(unique_matches) == 1:
+            namespace[identifier] = _column_array(dataframe, unique_matches[0])
+
+    token_index = 0
+
+    def replace_column(match):
+        nonlocal token_index
+        column = _resolve_expression_column(dataframe, match.group(1))
+        variable = "_column_{}".format(token_index)
+        token_index += 1
+        namespace[variable] = _column_array(dataframe, column)
+        return variable
+
+    prepared = re.sub(r"\{([^{}]+)\}", replace_column, expression)
+    for name in tuple(_MATH_FUNCTIONS) + tuple(_MATH_CONSTANTS):
+        prepared = re.sub(r"\bnp\.{}\b".format(re.escape(name)), name, prepared)
+
+    try:
+        tree = ast.parse(prepared, mode="eval")
+    except SyntaxError as exc:
+        raise ValueError("Invalid expression syntax: {}".format(exc.msg)) from exc
+
+    for node in ast.walk(tree):
+        if not isinstance(node, _MATH_AST_NODES):
+            raise ValueError("Unsupported expression element: {}".format(type(node).__name__))
+        if isinstance(node, ast.Call):
+            if not isinstance(node.func, ast.Name) or node.func.id not in _MATH_FUNCTIONS:
+                raise ValueError("Unsupported function")
+            if node.keywords:
+                raise ValueError("Function keyword arguments are not supported")
+        if isinstance(node, ast.Name) and node.id not in namespace:
+            raise ValueError("Unknown variable or function: {}".format(node.id))
+        if isinstance(node, ast.Constant) and not isinstance(node.value, (int, float, bool)):
+            raise ValueError("Only numeric constants are supported")
+
+    with np.errstate(all="ignore"):
+        result = eval(compile(tree, "<calculation>", "eval"), {"__builtins__": {}}, namespace)
+    result = np.asarray(result)
+    if result.ndim == 0:
+        result = np.full(len(dataframe), result.item())
+    if result.ndim != 1:
+        raise ValueError("Result must be a one-dimensional variable")
+    if len(result) != len(dataframe):
+        raise ValueError(
+            "Result has {:,} values; the table has {:,} rows".format(len(result), len(dataframe))
+        )
+    if result.dtype.kind not in "biuf":
+        raise ValueError("Result must contain numeric values")
+    return result
+
+
 _PLOT_PALETTE = (
     (0, 87, 184),     # blue
     (209, 73, 0),     # vermilion
@@ -407,6 +599,8 @@ def _default_lazy_workers():
 
 class NumericAxisItem(pg.AxisItem):
     def tickStrings(self, values, scale, spacing):
+        if self.logMode:
+            return super().tickStrings(values, scale, spacing)
         labels = []
         for value in values:
             v = value * scale
@@ -456,6 +650,194 @@ class DataFrameModel(QtCore.QAbstractTableModel):
         return str(section)
 
 
+class CalculationDialog(QtWidgets.QDialog):
+    def __init__(self, columns, selected_columns=None, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Mathematical operation")
+        self.resize(680, 470)
+        self._columns = [str(column) for column in columns if str(column) != "Index"]
+
+        root = QtWidgets.QVBoxLayout(self)
+        root.setContentsMargins(12, 12, 12, 12)
+        root.setSpacing(8)
+
+        content = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
+        root.addWidget(content, 1)
+
+        column_panel = QtWidgets.QWidget()
+        column_layout = QtWidgets.QVBoxLayout(column_panel)
+        column_layout.setContentsMargins(0, 0, 0, 0)
+        column_layout.addWidget(QtWidgets.QLabel("VARIABLES"))
+        self.column_filter = QtWidgets.QLineEdit()
+        self.column_filter.setPlaceholderText("Filter variables")
+        self.column_filter.setClearButtonEnabled(True)
+        column_layout.addWidget(self.column_filter)
+        self.column_list = QtWidgets.QListWidget()
+        column_layout.addWidget(self.column_list, 1)
+        content.addWidget(column_panel)
+
+        expression_panel = QtWidgets.QWidget()
+        expression_layout = QtWidgets.QFormLayout(expression_panel)
+        expression_layout.setContentsMargins(8, 0, 0, 0)
+        expression_layout.setSpacing(8)
+        self.result_name = QtWidgets.QLineEdit()
+        self.result_name.setText("Calculated")
+        expression_layout.addRow("Result name", self.result_name)
+        self.expression = QtWidgets.QPlainTextEdit()
+        self.expression.setMaximumHeight(110)
+        expression_layout.addRow("Expression", self.expression)
+        self.function_combo = QtWidgets.QComboBox()
+        self.function_combo.addItem("Insert function")
+        self.function_combo.addItems(list(_MATH_FUNCTIONS))
+        expression_layout.addRow("Function", self.function_combo)
+        content.addWidget(expression_panel)
+        content.setSizes([260, 400])
+
+        buttons = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Cancel)
+        self.add_button = buttons.addButton("Add and plot", QtWidgets.QDialogButtonBox.AcceptRole)
+        self.add_button.setObjectName("primaryButton")
+        root.addWidget(buttons)
+
+        selected_columns = [str(column) for column in (selected_columns or [])]
+        if len(selected_columns) >= 2:
+            self.expression.setPlainText(
+                "{{{}}} - {{{}}}".format(selected_columns[0], selected_columns[1])
+            )
+            self.result_name.setText("Difference")
+        elif selected_columns:
+            self.expression.setPlainText("{{{}}}".format(selected_columns[0]))
+
+        self.column_filter.textChanged.connect(lambda _text: self.populate_columns())
+        self.column_list.itemDoubleClicked.connect(self.insert_column)
+        self.function_combo.activated.connect(self.insert_function)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        self.populate_columns()
+
+    def populate_columns(self):
+        text_filter = self.column_filter.text().strip().lower()
+        self.column_list.clear()
+        for column in self._columns:
+            if text_filter and text_filter not in column.lower():
+                continue
+            item = QtWidgets.QListWidgetItem(column)
+            item.setData(QtCore.Qt.UserRole, column)
+            self.column_list.addItem(item)
+
+    def insert_column(self, item):
+        self.expression.insertPlainText("{{{}}}".format(item.data(QtCore.Qt.UserRole)))
+        self.expression.setFocus()
+
+    def insert_function(self, index):
+        if index <= 0:
+            return
+        name = self.function_combo.itemText(index)
+        self.expression.insertPlainText("{}()".format(name))
+        cursor = self.expression.textCursor()
+        cursor.movePosition(QtGui.QTextCursor.MoveOperation.Left)
+        self.expression.setTextCursor(cursor)
+        self.expression.setFocus()
+        self.function_combo.setCurrentIndex(0)
+
+    def accept(self):
+        if not self.result_name.text().strip():
+            self.result_name.setFocus()
+            return
+        if not self.expression.toPlainText().strip():
+            self.expression.setFocus()
+            return
+        super().accept()
+
+    def values(self):
+        return self.result_name.text().strip(), self.expression.toPlainText().strip()
+
+
+class AxisLimitsDialog(QtWidgets.QDialog):
+    def __init__(self, limits=None, logx=False, logy=False, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Axis limits")
+        self.setMinimumWidth(390)
+        self.logx = bool(logx)
+        self.logy = bool(logy)
+        self._limits = dict(limits or {})
+
+        root = QtWidgets.QVBoxLayout(self)
+        form = QtWidgets.QGridLayout()
+        form.setHorizontalSpacing(8)
+        form.setVerticalSpacing(8)
+        root.addLayout(form)
+
+        form.addWidget(QtWidgets.QLabel("Axis"), 0, 0)
+        form.addWidget(QtWidgets.QLabel("Minimum"), 0, 1)
+        form.addWidget(QtWidgets.QLabel("Maximum"), 0, 2)
+        self.edits = {}
+        for row, (axis, minimum_key, maximum_key) in enumerate(
+            (("X", "xmin", "xmax"), ("Y", "ymin", "ymax")),
+            start=1,
+        ):
+            form.addWidget(QtWidgets.QLabel(axis), row, 0)
+            for column, key in ((1, minimum_key), (2, maximum_key)):
+                edit = QtWidgets.QLineEdit()
+                edit.setPlaceholderText("Auto")
+                value = self._limits.get(key)
+                if value is not None:
+                    edit.setText("{:.12g}".format(value))
+                form.addWidget(edit, row, column)
+                self.edits[key] = edit
+
+        buttons = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel
+        )
+        self.auto_button = buttons.addButton("Reset to auto", QtWidgets.QDialogButtonBox.ResetRole)
+        root.addWidget(buttons)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        self.auto_button.clicked.connect(self.reset_to_auto)
+
+    @staticmethod
+    def _parse_value(text):
+        text = text.strip()
+        if not text:
+            return None
+        value = float(text.replace(",", "."))
+        if not np.isfinite(value):
+            raise ValueError("Axis limits must be finite numbers")
+        return value
+
+    def accept(self):
+        try:
+            limits = {
+                key: self._parse_value(edit.text())
+                for key, edit in self.edits.items()
+            }
+            for axis, minimum_key, maximum_key, logarithmic in (
+                ("X", "xmin", "xmax", self.logx),
+                ("Y", "ymin", "ymax", self.logy),
+            ):
+                minimum = limits[minimum_key]
+                maximum = limits[maximum_key]
+                if minimum is not None and maximum is not None and minimum >= maximum:
+                    raise ValueError("{} minimum must be less than {} maximum".format(axis, axis))
+                if logarithmic and any(
+                    value is not None and value <= 0 for value in (minimum, maximum)
+                ):
+                    raise ValueError("{} limits must be positive in logarithmic mode".format(axis))
+        except ValueError as exc:
+            QtWidgets.QMessageBox.warning(self, "Axis limits", str(exc))
+            return
+        self._limits = limits
+        super().accept()
+
+    def reset_to_auto(self):
+        self._limits = {key: None for key in ("xmin", "xmax", "ymin", "ymax")}
+        for edit in self.edits.values():
+            edit.clear()
+        super().accept()
+
+    def values(self):
+        return dict(self._limits)
+
+
 class ScanDialog(QtWidgets.QDialog):
     def __init__(self, file_formats, parent=None, settings=None):
         super().__init__(parent)
@@ -491,10 +873,11 @@ class ScanDialog(QtWidgets.QDialog):
         bladed_row = QtWidgets.QHBoxLayout()
         bladed_row.addWidget(QtWidgets.QLabel("Bladed suffixes"))
         self.bladed_suffix_edit = QtWidgets.QLineEdit()
-        self.bladed_suffix_edit.setPlaceholderText("04, 05, 298")
+        self.bladed_suffix_edit.setPlaceholderText("Blank = .$PJ only; or 04, 05, 298")
         self.bladed_suffix_edit.setText(str(self.settings.value("scan/bladed_suffixes", "") or ""))
         self.bladed_suffix_edit.setToolTip(
-            "Only for Bladed output scans. Example: 04 matches .$04, .%04, or .04."
+            "Leave blank to scan only Bladed .$PJ projects. Enter suffixes such as 04 or 298 "
+            "to scan those .$ output files instead."
         )
         bladed_row.addWidget(self.bladed_suffix_edit, 1)
         root.addLayout(bladed_row)
@@ -629,7 +1012,10 @@ class QtPlotCanvas(pg.GraphicsLayoutWidget):
 
     def plot_data(self, plot_data, *, subplots=False, sharex=True, grid=True,
                   logx=False, logy=False, show_legend=True, line_width=1.25,
-                  marker=None, step=False):
+                  marker=None, step=False, axis_limits=None):
+        # QGraphicsView's OpenGL viewport can crash on Windows when log transforms
+        # discard points. Keep accelerated rendering for regular plots.
+        self.useOpenGL(not (logx or logy))
         self.clear_plot()
         if len(plot_data) == 0:
             return
@@ -665,7 +1051,7 @@ class QtPlotCanvas(pg.GraphicsLayoutWidget):
 
             for pd in group:
                 try:
-                    x, y = _finite_xy(pd.x, pd.y)
+                    x, y = _plot_ready_xy(pd.x, pd.y, logx=logx, logy=logy)
                 except Exception as exc:
                     print("Skipping non-numeric curve {}: {}".format(pd.sy, exc))
                     continue
@@ -681,7 +1067,7 @@ class QtPlotCanvas(pg.GraphicsLayoutWidget):
                     symbolSize=5 if marker else None,
                     symbolBrush=curve_color if marker else None,
                     symbolPen=pg.mkPen(curve_color) if marker else None,
-                    skipFiniteCheck=True,
+                    skipFiniteCheck=not (logx or logy),
                 )
                 item.setClipToView(True)
                 item.setDownsampling(auto=True, method="peak")
@@ -704,6 +1090,54 @@ class QtPlotCanvas(pg.GraphicsLayoutWidget):
 
             if logx or logy:
                 plot.setLogMode(x=logx, y=logy)
+            self._apply_axis_limits(
+                plot,
+                axis_limits or {},
+                logx=logx,
+                logy=logy,
+            )
+
+    @staticmethod
+    def _limited_range(current_range, minimum, maximum, logarithmic, axis):
+        def transform(value):
+            if value is None:
+                return None
+            if logarithmic:
+                if value <= 0:
+                    raise ValueError(
+                        "{} limits must be positive in logarithmic mode".format(axis)
+                    )
+                return float(np.log10(value))
+            return float(value)
+
+        minimum = transform(minimum)
+        maximum = transform(maximum)
+        if minimum is not None and maximum is not None and minimum >= maximum:
+            raise ValueError("{} minimum must be less than {} maximum".format(axis, axis))
+
+        lower = current_range[0] if minimum is None else minimum
+        upper = current_range[1] if maximum is None else maximum
+        if lower >= upper:
+            if minimum is not None and maximum is None:
+                upper = lower + max(abs(lower) * 0.05, 1.0)
+            elif maximum is not None and minimum is None:
+                lower = upper - max(abs(upper) * 0.05, 1.0)
+        return lower, upper
+
+    @classmethod
+    def _apply_axis_limits(cls, plot, limits, logx=False, logy=False):
+        x_values = (limits.get("xmin"), limits.get("xmax"))
+        y_values = (limits.get("ymin"), limits.get("ymax"))
+        if not any(value is not None for value in x_values + y_values):
+            return
+        plot.autoRange()
+        x_current, y_current = plot.getViewBox().viewRange()
+        if any(value is not None for value in x_values):
+            x_range = cls._limited_range(x_current, *x_values, logx, "X")
+            plot.setXRange(*x_range, padding=0)
+        if any(value is not None for value in y_values):
+            y_range = cls._limited_range(y_current, *y_values, logy, "Y")
+            plot.setYRange(*y_range, padding=0)
 
     def select_curve(self, selected_item, meta):
         for item, base_pen, _ in self._curve_items:
@@ -762,16 +1196,27 @@ class MainWindow(QtWidgets.QMainWindow):
         self.plot_data = []
         self.current_files = []
         self.lazy_entries = []
-        self.lazy_load_queue = []
+        self.lazy_load_queue = deque()
         self.lazy_loader_threads = {}
         self.lazy_loader_workers = {}
         self.lazy_generation = 0
         self.lazy_max_workers = _default_lazy_workers()
         self.lazy_warning_backlog = []
+        self.lazy_item_widgets = {}
+        self.lazy_loaded_total = 0
+        self.lazy_selected_batch = set()
+        self.lazy_selection_refresh_pending = False
+        self.lazy_last_ui_update = 0.0
         self.plot_after_lazy_load = False
         self.selector_panes = []
         self.lazy_batch_total = 0
         self.lazy_batch_done = 0
+        self.active_selector_pane = None
+        self.axis_limits = {key: None for key in ("xmin", "xmax", "ymin", "ymax")}
+        self.redraw_timer = QtCore.QTimer(self)
+        self.redraw_timer.setSingleShot(True)
+        self.redraw_timer.setInterval(40)
+        self.redraw_timer.timeout.connect(self.redraw)
 
         self._build_ui()
         self._connect()
@@ -823,6 +1268,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.line_width_spin.setValue(1.25)
         self.marker_combo = QtWidgets.QComboBox()
         self.marker_combo.addItems(["None", "Circle", "Square", "Triangle", "Diamond"])
+        self.axis_limits_button = QtWidgets.QPushButton("Limits")
+        self.axis_limits_button.setToolTip("Set X and Y plot limits")
         self.load_workers_combo = QtWidgets.QComboBox()
         self.load_workers_combo.addItems(["Auto", "1", "2", "4", "8", "16", "32", "64", "96"])
         self.load_workers_combo.setToolTip("Maximum parallel file load workers. Auto is capped on Windows to reduce UI hangs.")
@@ -853,6 +1300,7 @@ class MainWindow(QtWidgets.QMainWindow):
         top.addWidget(self.line_width_spin, 1, 5)
         top.addWidget(QtWidgets.QLabel("Marker"), 1, 6)
         top.addWidget(self.marker_combo, 1, 7)
+        top.addWidget(self.axis_limits_button, 1, 8)
         load_controls = QtWidgets.QHBoxLayout()
         load_controls.setContentsMargins(0, 0, 0, 0)
         load_controls.setSpacing(6)
@@ -875,20 +1323,27 @@ class MainWindow(QtWidgets.QMainWindow):
         side_layout.addWidget(self.selector_splitter, 1)
         self.set_compare_pane_count(1)
 
-        button_row = QtWidgets.QHBoxLayout()
+        button_row = QtWidgets.QGridLayout()
+        button_row.setHorizontalSpacing(6)
+        button_row.setVerticalSpacing(6)
         self.plot_button = QtWidgets.QPushButton("Plot")
         self.plot_button.setObjectName("primaryButton")
         self.plot_button.setIcon(QtGui.QIcon(_resource_path("icons", "chart.svg")))
         self.clear_button = QtWidgets.QPushButton("Clear")
         self.select_all_y_button = QtWidgets.QPushButton("All Y")
         self.select_none_y_button = QtWidgets.QPushButton("None")
-        self.load_selected_button = QtWidgets.QPushButton("Load selected")
-        self.load_selected_button.setToolTip("Parse the selected indexed files and cache them in memory")
-        button_row.addWidget(self.plot_button)
-        button_row.addWidget(self.clear_button)
-        button_row.addWidget(self.select_all_y_button)
-        button_row.addWidget(self.select_none_y_button)
-        button_row.addWidget(self.load_selected_button)
+        self.load_selected_button = QtWidgets.QPushButton("Load full selected")
+        self.load_selected_button.setToolTip(
+            "Load every variable from the selected indexed files"
+        )
+        self.math_button = QtWidgets.QPushButton("Calculate")
+        self.math_button.setToolTip("Create and plot a variable from a mathematical expression")
+        button_row.addWidget(self.plot_button, 0, 0)
+        button_row.addWidget(self.clear_button, 0, 1)
+        button_row.addWidget(self.select_all_y_button, 0, 2)
+        button_row.addWidget(self.select_none_y_button, 0, 3)
+        button_row.addWidget(self.load_selected_button, 1, 0, 1, 2)
+        button_row.addWidget(self.math_button, 1, 2, 1, 2)
         side_layout.addLayout(button_row)
 
         self.canvas = QtPlotCanvas()
@@ -969,15 +1424,23 @@ class MainWindow(QtWidgets.QMainWindow):
             x_combo,
             y_list_widget,
         )
-        table_list_widget.itemSelectionChanged.connect(self.on_table_selection_changed)
+        table_list_widget.itemSelectionChanged.connect(
+            lambda p=pane: self.on_table_selection_changed(p)
+        )
         bladed_dataset_combo.currentIndexChanged.connect(
             lambda _index, p=pane: self.on_bladed_dataset_changed(p)
         )
-        x_combo.currentIndexChanged.connect(self.on_selection_changed)
-        y_list_widget.itemSelectionChanged.connect(self.on_selection_changed)
+        x_combo.currentIndexChanged.connect(
+            lambda _index, p=pane: self.on_pane_selection_changed(p)
+        )
+        y_list_widget.itemSelectionChanged.connect(
+            lambda p=pane: self.on_pane_selection_changed(p)
+        )
         column_filter.textChanged.connect(lambda _text, p=pane: self.populate_columns(p))
         self.selector_splitter.addWidget(frame)
         self.selector_panes.append(pane)
+        if self.active_selector_pane is None:
+            self.active_selector_pane = pane
         if index == 0:
             self.table_list_widget = table_list_widget
             self.column_filter = column_filter
@@ -1183,6 +1646,12 @@ class MainWindow(QtWidgets.QMainWindow):
             QPushButton#primaryButton:hover {
                 background: #0f5dad;
             }
+            QPushButton[limitsActive="true"] {
+                color: #174ea6;
+                background: #dbeafe;
+                border: 2px solid #2f74c8;
+                font-weight: 600;
+            }
             QPushButton:disabled, QToolButton:disabled,
             QComboBox:disabled, QLineEdit:disabled, QDoubleSpinBox:disabled {
                 color: #8793a0;
@@ -1298,10 +1767,16 @@ class MainWindow(QtWidgets.QMainWindow):
         view_menu = self.menuBar().addMenu("&View")
         self.autorange_action = view_menu.addAction("Auto range")
         self.autorange_action.triggered.connect(self.auto_range)
+        self.axis_limits_action = view_menu.addAction("Axis limits")
+        self.axis_limits_action.triggered.connect(self.open_axis_limits_dialog)
         self.standardize_si_action = view_menu.addAction("Standardize units to SI")
         self.standardize_si_action.triggered.connect(self.standardize_units_si)
         view_export_plot_action = view_menu.addAction("Export plot")
         view_export_plot_action.triggered.connect(self.export_plot_image)
+
+        tools_menu = self.menuBar().addMenu("&Tools")
+        self.math_action = tools_menu.addAction("Mathematical operation")
+        self.math_action.triggered.connect(self.open_calculation_dialog)
 
     def _connect(self):
         self.plot_type_combo.currentIndexChanged.connect(self.on_selection_changed)
@@ -1313,6 +1788,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.legend_check.stateChanged.connect(self.on_selection_changed)
         self.line_width_spin.valueChanged.connect(self.on_selection_changed)
         self.marker_combo.currentIndexChanged.connect(self.on_selection_changed)
+        self.axis_limits_button.clicked.connect(self.open_axis_limits_dialog)
         self.load_workers_combo.currentIndexChanged.connect(self.update_lazy_worker_limit)
         self.canvas.curveSelected.connect(self.on_curve_selected)
         self.plot_button.clicked.connect(self.redraw)
@@ -1320,11 +1796,17 @@ class MainWindow(QtWidgets.QMainWindow):
         self.select_all_y_button.clicked.connect(self.select_all_y)
         self.select_none_y_button.clicked.connect(self.select_none_y)
         self.load_selected_button.clicked.connect(self.load_selected_lazy_files)
+        self.math_button.clicked.connect(self.open_calculation_dialog)
 
     def on_compare_mode_changed(self):
         self.set_compare_pane_count(self.compare_pane_count())
         self.populate_tables()
         QtCore.QTimer.singleShot(0, self.resize_compare_region)
+        self.on_selection_changed()
+
+    def on_pane_selection_changed(self, pane):
+        if pane in self.visible_selector_panes():
+            self.active_selector_pane = pane
         self.on_selection_changed()
 
     def update_lazy_worker_limit(self):
@@ -1343,9 +1825,11 @@ class MainWindow(QtWidgets.QMainWindow):
             self.reload_action,
             self.scan_action,
             self.autorange_action,
+            self.axis_limits_action,
             self.standardize_si_action,
             self.export_table_action,
             self.export_plot_action,
+            self.math_action,
         ):
             action.setEnabled(enabled)
         for widget in (
@@ -1359,12 +1843,14 @@ class MainWindow(QtWidgets.QMainWindow):
             self.legend_check,
             self.line_width_spin,
             self.marker_combo,
+            self.axis_limits_button,
             self.load_workers_combo,
             self.plot_button,
             self.clear_button,
             self.select_all_y_button,
             self.select_none_y_button,
             self.load_selected_button,
+            self.math_button,
         ):
             widget.setEnabled(enabled)
         for pane in self.selector_panes:
@@ -1382,14 +1868,25 @@ class MainWindow(QtWidgets.QMainWindow):
         self.loading_progress.setValue(self.lazy_batch_done)
         self.loading_progress.setFormat("Loading %v/%m")
         self.loading_progress.setVisible(True)
+        self.lazy_last_ui_update = 0.0
         self.set_loading_controls_enabled(False)
 
     def advance_lazy_load_progress(self):
         if self.lazy_batch_total <= 0:
-            return
+            return False
         self.lazy_batch_done = min(self.lazy_batch_done + 1, self.lazy_batch_total)
-        self.loading_progress.setValue(self.lazy_batch_done)
-        self.loading_progress.setFormat("Loading {}/{}".format(self.lazy_batch_done, self.lazy_batch_total))
+        now = time.perf_counter()
+        refresh = (
+            self.lazy_batch_done >= self.lazy_batch_total
+            or now - self.lazy_last_ui_update >= 0.1
+        )
+        if refresh:
+            self.lazy_last_ui_update = now
+            self.loading_progress.setValue(self.lazy_batch_done)
+            self.loading_progress.setFormat(
+                "Loading {}/{}".format(self.lazy_batch_done, self.lazy_batch_total)
+            )
+        return refresh
 
     def finish_lazy_load_batch_if_done(self):
         if self.lazy_batch_total <= 0:
@@ -1399,9 +1896,28 @@ class MainWindow(QtWidgets.QMainWindow):
         self.loading_progress.setValue(self.lazy_batch_total)
         self.loading_progress.setFormat("Loaded {}/{}".format(self.lazy_batch_done, self.lazy_batch_total))
         self.loading_progress.setVisible(False)
+        self.status_label.setText(
+            "{:,} files indexed, {:,} loaded, 0 active".format(
+                len(self.lazy_entries), self.lazy_loaded_count()
+            )
+        )
         self.lazy_batch_total = 0
         self.lazy_batch_done = 0
+        self.lazy_last_ui_update = 0.0
+        self.flush_lazy_selection_refresh()
+        self.lazy_selected_batch = set()
         self.set_loading_controls_enabled(True)
+
+    def flush_lazy_selection_refresh(self):
+        needs_plot = self.plot_after_lazy_load
+        self.plot_after_lazy_load = False
+        if self.lazy_selection_refresh_pending:
+            self.lazy_selection_refresh_pending = False
+            self.on_table_selection_changed()
+            if needs_plot and not self.live_plot.isChecked():
+                self.redraw()
+        elif needs_plot:
+            self.redraw()
 
     def _show_file_format_errors(self):
         for err in self.file_format_errors:
@@ -1470,9 +1986,13 @@ class MainWindow(QtWidgets.QMainWindow):
                 return None
             if self.lazy_entries:
                 self.lazy_generation += 1
-                self.lazy_load_queue = []
+                self.lazy_load_queue = deque()
                 self.lazy_warning_backlog = []
                 self.lazy_entries = []
+                self.lazy_item_widgets = {}
+                self.lazy_loaded_total = 0
+                self.lazy_selected_batch = set()
+                self.lazy_selection_refresh_pending = False
             if not add:
                 self.tab_list.clean()
                 self.current_files = []
@@ -1514,8 +2034,12 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def set_lazy_file_index(self, matches):
         self.lazy_generation += 1
-        self.lazy_load_queue = []
+        self.lazy_load_queue = deque()
         self.lazy_warning_backlog = []
+        self.lazy_item_widgets = {}
+        self.lazy_loaded_total = 0
+        self.lazy_selected_batch = set()
+        self.lazy_selection_refresh_pending = False
         self.tab_list.clean()
         self.current_files = [path for path, _ in matches]
         self.lazy_entries = []
@@ -1533,11 +2057,17 @@ class MainWindow(QtWidgets.QMainWindow):
         self.status_label.setText("{:,} files indexed, 0 loaded".format(len(self.lazy_entries)))
 
     def lazy_loaded_count(self):
-        return sum(1 for entry in self.lazy_entries if entry.loaded)
+        return self.lazy_loaded_total
 
     def lazy_item_text(self, entry):
-        if entry.loaded:
+        if entry.full_loaded:
             state = "loaded"
+        elif entry.loaded:
+            total = len(entry.columns) if entry.columns else "?"
+            state = "partial {}/{}".format(
+                len(entry.loaded_column_indices),
+                total,
+            )
         elif entry.loading:
             state = "loading"
         elif entry.attempted:
@@ -1550,7 +2080,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def ensure_lazy_header(self, lazy_index):
         entry = self.lazy_entries[lazy_index]
-        if entry.columns or entry.header_attempted or entry.loaded:
+        if entry.columns or entry.header_attempted:
             return
         entry.header_attempted = True
         try:
@@ -1558,37 +2088,77 @@ class MainWindow(QtWidgets.QMainWindow):
         except Exception as exc:
             entry.warning = "Header read failed: {}: {}".format(type(exc).__name__, exc)
 
-    def ensure_lazy_loaded(self, lazy_index, show_warning=True):
+    def lazy_request_satisfied(self, entry, channel_indices):
+        if entry.full_loaded:
+            return True
+        if channel_indices is None:
+            return False
+        if not channel_indices:
+            return True
+        return entry.loaded and set(channel_indices).issubset(
+            entry.loaded_column_indices
+        )
+
+    def is_lazy_queued(self, lazy_index):
+        return any(item[0] == lazy_index for item in self.lazy_load_queue)
+
+    def ensure_lazy_loaded(
+            self,
+            lazy_index,
+            show_warning=True,
+            channel_indices=None):
         entry = self.lazy_entries[lazy_index]
-        if entry.loaded:
+        if self.lazy_request_satisfied(entry, channel_indices):
             return entry.table_indices
-        if entry.attempted:
+        if entry.attempted and not entry.loaded:
             if entry.warning and show_warning:
                 QtWidgets.QMessageBox.warning(self, "Load warning", entry.warning)
             return []
-        self.queue_lazy_load(lazy_index)
+        self.queue_lazy_load(lazy_index, channel_indices=channel_indices)
         return []
 
-    def pending_lazy_indices(self, lazy_indices):
+    def pending_lazy_indices(self, lazy_indices, column_requests=None):
         pending = []
         for lazy_index in lazy_indices:
             entry = self.lazy_entries[lazy_index]
-            if entry.loaded or entry.loading or entry.attempted or lazy_index in self.lazy_load_queue:
+            request = (
+                column_requests.get(lazy_index)
+                if column_requests is not None
+                else None
+            )
+            if self.lazy_request_satisfied(entry, request):
+                continue
+            if (
+                entry.loading
+                or (entry.attempted and not entry.loaded)
+                or self.is_lazy_queued(lazy_index)
+            ):
                 continue
             pending.append(lazy_index)
         return pending
 
-    def queue_lazy_load(self, lazy_index):
+    def queue_lazy_load(self, lazy_index, channel_indices=None):
         entry = self.lazy_entries[lazy_index]
-        if entry.loaded or entry.loading or entry.attempted or lazy_index in self.lazy_load_queue:
+        if self.lazy_request_satisfied(entry, channel_indices):
             return
+        if (
+            entry.loading
+            or (entry.attempted and not entry.loaded)
+            or self.is_lazy_queued(lazy_index)
+        ):
+            return
+        if channel_indices is not None:
+            channel_indices = tuple(sorted(
+                entry.loaded_column_indices.union(channel_indices)
+            ))
         if self.lazy_batch_total == 0:
             self.begin_lazy_load_batch(1)
         entry.loading = True
-        self.lazy_load_queue.append(lazy_index)
-        self.status_label.setText("Loading {}".format(entry.basename))
-        self.statusBar().showMessage("Queued {}".format(entry.path))
-        self.update_lazy_item(lazy_index)
+        self.lazy_load_queue.append((lazy_index, channel_indices))
+        if self.lazy_batch_total <= 1:
+            self.status_label.setText("Loading {}".format(entry.basename))
+            self.statusBar().showMessage("Queued {}".format(entry.path))
+            self.update_lazy_item(lazy_index)
         self.start_next_lazy_load()
 
     def start_next_lazy_load(self):
@@ -1598,17 +2168,25 @@ class MainWindow(QtWidgets.QMainWindow):
     def start_one_lazy_load(self):
         if not self.lazy_load_queue:
             return
-        lazy_index = self.lazy_load_queue.pop(0)
+        lazy_index, channel_indices = self.lazy_load_queue.popleft()
         if lazy_index >= len(self.lazy_entries):
             self.start_next_lazy_load()
             return
         entry = self.lazy_entries[lazy_index]
-        self.status_label.setText("Loading {}".format(entry.basename))
-        self.statusBar().showMessage("Loading {}".format(entry.path))
+        if self.lazy_batch_total <= 1:
+            self.status_label.setText("Loading {}".format(entry.basename))
+            self.statusBar().showMessage("Loading {}".format(entry.path))
 
         generation = self.lazy_generation
         thread = QtCore.QThread(self)
-        worker = LazyLoadWorker(generation, lazy_index, entry.path, entry.file_format, self.tab_list.options)
+        worker = LazyLoadWorker(
+            generation,
+            lazy_index,
+            entry.path,
+            entry.file_format,
+            self.tab_list.options,
+            channel_indices=channel_indices,
+        )
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
         worker.finished.connect(self.on_lazy_load_finished)
@@ -1620,56 +2198,73 @@ class MainWindow(QtWidgets.QMainWindow):
         self.lazy_loader_workers[lazy_index] = worker
         thread.start()
 
-    def on_lazy_load_finished(self, generation, lazy_index, tabs, warning, elapsed, format_name):
+    def on_lazy_load_finished(
+            self,
+            generation,
+            lazy_index,
+            tabs,
+            warning,
+            elapsed,
+            format_name,
+            loaded_column_indices):
         if generation != self.lazy_generation:
             return
         if lazy_index >= len(self.lazy_entries):
             return
         entry = self.lazy_entries[lazy_index]
-        start = len(self.tab_list)
+        was_loaded = entry.loaded
         if tabs:
-            self.tab_list.append(tabs)
-            entry.table_indices = list(range(start, start + len(tabs)))
+            if was_loaded and len(entry.table_indices) == len(tabs):
+                for table_index, tab in zip(entry.table_indices, tabs):
+                    self.tab_list._tabs[table_index] = tab
+            else:
+                start = len(self.tab_list)
+                self.tab_list.append(tabs)
+                entry.table_indices = list(range(start, start + len(tabs)))
+                if not was_loaded:
+                    self.lazy_loaded_total += 1
+            if loaded_column_indices is None:
+                entry.full_loaded = True
+                entry.loaded_column_indices = set(range(len(entry.columns)))
+            else:
+                entry.loaded_column_indices = set(loaded_column_indices)
         entry.warning = warning or ""
-        entry.attempted = True
+        entry.attempted = not tabs and not entry.loaded
         entry.loading = False
-        self.advance_lazy_load_progress()
+        refresh_ui = self.advance_lazy_load_progress()
         self.update_lazy_item(lazy_index)
-        self.current_files = sorted(set(self.current_files + self.tab_list.filenames))
-        self.status_label.setText(
-            "{:,} files indexed, {:,} loaded, {:,} active".format(
-                len(self.lazy_entries), self.lazy_loaded_count(), len(self.lazy_loader_threads)
+        if refresh_ui:
+            self.status_label.setText(
+                "{:,} files indexed, {:,} loaded, {:,} active".format(
+                    len(self.lazy_entries), self.lazy_loaded_count(), len(self.lazy_loader_threads)
+                )
             )
-        )
         n_rows = sum(getattr(tab, "nRows", 0) for tab in tabs) if tabs else 0
         n_cols = sum(getattr(tab, "nCols", 0) for tab in tabs) if tabs else 0
-        self.statusBar().showMessage(
-            "Loaded {} in {:.3f}s ({}, {:,} rows, {:,} cols)".format(
-                entry.basename, elapsed, format_name, n_rows, n_cols
-            ),
-            12000,
-        )
+        if refresh_ui:
+            self.statusBar().showMessage(
+                "Loaded {} in {:.3f}s ({}, {:,} rows, {:,} cols)".format(
+                    entry.basename, elapsed, format_name, n_rows, n_cols
+                ),
+                12000,
+            )
         if entry.warning:
             self.lazy_warning_backlog.append(entry.warning)
         if self.is_lazy_selected(lazy_index):
-            self.on_table_selection_changed()
-        if self.plot_after_lazy_load and not self.has_unloaded_lazy_selection():
-            self.plot_after_lazy_load = False
-            self.redraw()
+            self.lazy_selection_refresh_pending = True
+        if not self.has_unloaded_lazy_selection():
+            self.flush_lazy_selection_refresh()
         self.finish_lazy_load_batch_if_done()
 
     def on_lazy_thread_finished(self, lazy_index):
         self.lazy_loader_threads.pop(lazy_index, None)
         self.lazy_loader_workers.pop(lazy_index, None)
-        self.status_label.setText(
-            "{:,} files indexed, {:,} loaded, {:,} active".format(
-                len(self.lazy_entries), self.lazy_loaded_count(), len(self.lazy_loader_threads)
-            )
-        )
         self.start_next_lazy_load()
         self.finish_lazy_load_batch_if_done()
 
     def is_lazy_selected(self, lazy_index):
+        if self.lazy_selected_batch:
+            return lazy_index in self.lazy_selected_batch
         for pane in self.visible_selector_panes():
             for item in pane.table_list_widget.selectedItems():
                 data = item.data(QtCore.Qt.UserRole)
@@ -1678,21 +2273,29 @@ class MainWindow(QtWidgets.QMainWindow):
         return False
 
     def update_lazy_item(self, lazy_index):
-        for pane in self.selector_panes:
-            for row in range(pane.table_list_widget.count()):
-                item = pane.table_list_widget.item(row)
-                data = item.data(QtCore.Qt.UserRole)
-                if isinstance(data, tuple) and data == ("lazy", lazy_index):
-                    item.setText(self.lazy_item_text(self.lazy_entries[lazy_index]))
+        text = self.lazy_item_text(self.lazy_entries[lazy_index])
+        for item in self.lazy_item_widgets.get(lazy_index, ()):
+            item.setText(text)
 
     def load_selected_lazy_files(self):
         lazy_indices = self.selected_lazy_indices()
         if not lazy_indices:
             return
-        self.begin_lazy_load_batch(len(self.pending_lazy_indices(lazy_indices)))
-        for i, lazy_index in enumerate(lazy_indices):
-            self.statusBar().showMessage("Queueing selected file {}/{}".format(i + 1, len(lazy_indices)))
-            self.ensure_lazy_loaded(lazy_index, show_warning=False)
+        pending = self.pending_lazy_indices(lazy_indices)
+        self.lazy_selected_batch = set(lazy_indices)
+        self.begin_lazy_load_batch(len(pending))
+        if pending:
+            self.statusBar().showMessage(
+                "Queueing {:,} selected files".format(len(pending))
+            )
+        for lazy_index in lazy_indices:
+            self.ensure_lazy_loaded(
+                lazy_index,
+                show_warning=False,
+                channel_indices=None,
+            )
+        if not pending:
+            self.lazy_selected_batch = set()
         self.on_table_selection_changed()
 
     def load_dfs(self, dataframes, names=None):
@@ -1703,9 +2306,13 @@ class MainWindow(QtWidgets.QMainWindow):
         if not isinstance(names, list):
             names = [names]
         self.lazy_generation += 1
-        self.lazy_load_queue = []
+        self.lazy_load_queue = deque()
         self.lazy_warning_backlog = []
         self.lazy_entries = []
+        self.lazy_item_widgets = {}
+        self.lazy_loaded_total = 0
+        self.lazy_selected_batch = set()
+        self.lazy_selection_refresh_pending = False
         self.tab_list.from_dataframes(dataframes=dataframes, names=names, bAdd=False)
         self.populate_tables()
         self.status_label.setText("{} tables loaded".format(len(self.tab_list)))
@@ -1714,12 +2321,15 @@ class MainWindow(QtWidgets.QMainWindow):
     def reload_files(self):
         if self.lazy_entries:
             self.lazy_generation += 1
-            self.lazy_load_queue = []
+            self.lazy_load_queue = deque()
             self.lazy_warning_backlog = []
             self.lazy_batch_total = 0
             self.lazy_batch_done = 0
             self.loading_progress.setVisible(False)
             self.set_loading_controls_enabled(True)
+            self.lazy_loaded_total = 0
+            self.lazy_selected_batch = set()
+            self.lazy_selection_refresh_pending = False
             for entry in self.lazy_entries:
                 entry.table_indices = []
                 entry.warning = ""
@@ -1727,6 +2337,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 entry.loading = False
                 entry.columns = []
                 entry.header_attempted = False
+                entry.loaded_column_indices = set()
+                entry.full_loaded = False
             self.tab_list.clean()
             self.populate_tables()
             self.clear()
@@ -1739,6 +2351,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def populate_tables(self):
         visible = self.visible_selector_panes()
         names = self.tab_list.getDisplayTabNames() if not self.lazy_entries else []
+        self.lazy_item_widgets = {}
         for pane_index, pane in enumerate(visible):
             pane.table_list_widget.blockSignals(True)
             pane.table_list_widget.clear()
@@ -1747,6 +2360,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     item = QtWidgets.QListWidgetItem(self.lazy_item_text(entry))
                     item.setData(QtCore.Qt.UserRole, ("lazy", i))
                     pane.table_list_widget.addItem(item)
+                    self.lazy_item_widgets.setdefault(i, []).append(item)
             else:
                 for i, tab in enumerate(self.tab_list):
                     item = QtWidgets.QListWidgetItem("{}  ({})".format(names[i], tab.shapestring))
@@ -1761,41 +2375,50 @@ class MainWindow(QtWidgets.QMainWindow):
     def selected_lazy_indices(self, pane=None):
         panes = [pane] if pane is not None else self.visible_selector_panes()
         indices = []
+        seen = set()
         for p in panes:
             for item in p.table_list_widget.selectedItems():
                 data = item.data(QtCore.Qt.UserRole)
-                if isinstance(data, tuple) and data[0] == "lazy" and data[1] not in indices:
+                if isinstance(data, tuple) and data[0] == "lazy" and data[1] not in seen:
                     indices.append(data[1])
+                    seen.add(data[1])
         return indices
 
     def selected_table_indices(self, load=True, show_warning=False, pane=None):
         panes = [pane] if pane is not None else self.visible_selector_panes()
         indices = []
+        seen = set()
         for p in panes:
             if not p.bladed_dataset_combo.isHidden():
                 table_index = p.bladed_dataset_combo.currentData()
                 if isinstance(table_index, int) and 0 <= table_index < len(self.tab_list):
-                    if table_index not in indices:
+                    if table_index not in seen:
                         indices.append(table_index)
+                        seen.add(table_index)
                     continue
             for item in p.table_list_widget.selectedItems():
                 data = item.data(QtCore.Qt.UserRole)
                 if isinstance(data, tuple) and data[0] == "table":
-                    if data[1] not in indices:
+                    if data[1] not in seen:
                         indices.append(data[1])
+                        seen.add(data[1])
                 elif isinstance(data, tuple) and data[0] == "lazy":
                     entry = self.lazy_entries[data[1]]
                     if entry.loaded:
                         for table_index in entry.table_indices:
-                            if table_index not in indices:
+                            if table_index not in seen:
                                 indices.append(table_index)
+                                seen.add(table_index)
                     elif load:
                         for table_index in self.ensure_lazy_loaded(data[1], show_warning=show_warning):
-                            if table_index not in indices:
+                            if table_index not in seen:
                                 indices.append(table_index)
+                                seen.add(table_index)
         return indices
 
-    def on_table_selection_changed(self):
+    def on_table_selection_changed(self, active_pane=None):
+        if active_pane in self.visible_selector_panes():
+            self.active_selector_pane = active_pane
         for pane in self.visible_selector_panes():
             self.populate_bladed_datasets(pane)
             self.populate_columns(pane)
@@ -1845,6 +2468,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def on_bladed_dataset_changed(self, pane):
         if pane.bladed_dataset_combo.isHidden():
             return
+        self.active_selector_pane = pane
         pane.y_list_widget.clearSelection()
         self.populate_columns(pane)
         self.update_table_preview()
@@ -1853,19 +2477,21 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def populate_columns(self, pane=None):
         pane = pane or self.selector_panes[0]
-        previous_x = pane.x_combo.currentData()
-        previous_y = set(self.selected_y_indices_original(pane))
+        previous_x_name = pane.x_combo.currentText()
+        previous_y_names = {
+            item.text() for item in pane.y_list_widget.selectedItems()
+        }
         lazy_indices = self.selected_lazy_indices(pane)
         indices = []
         columns = []
         if lazy_indices:
             lazy_index = lazy_indices[0]
             entry = self.lazy_entries[lazy_index]
-            if entry.loaded:
-                indices = self.selected_table_indices(load=False, pane=pane)
-            else:
-                self.ensure_lazy_header(lazy_index)
+            self.ensure_lazy_header(lazy_index)
+            if entry.columns:
                 columns = list(entry.columns)
+            elif entry.loaded:
+                indices = self.selected_table_indices(load=False, pane=pane)
         if not lazy_indices:
             indices = self.selected_table_indices(load=False, pane=pane)
         if not indices and len(self.tab_list) > 0 and not self.lazy_entries:
@@ -1889,31 +2515,40 @@ class MainWindow(QtWidgets.QMainWindow):
             pane.y_list_widget.addItem(item)
 
         if all_columns:
-            all_indices = [i for i, _ in all_columns]
-            if previous_x in all_indices:
-                x_to_select = previous_x
+            all_names = [col for _, col in all_columns]
+            if previous_x_name in all_names:
+                x_to_select = all_columns[all_names.index(previous_x_name)][0]
             else:
                 x_to_select = next((i for i, col in all_columns if col.lower().startswith("time")), all_columns[0][0])
-            pane.x_combo.setCurrentIndex(all_indices.index(x_to_select))
-        if visible_y and not previous_y:
+            pane.x_combo.setCurrentIndex(
+                next(
+                    row for row in range(pane.x_combo.count())
+                    if pane.x_combo.itemData(row) == x_to_select
+                )
+            )
+        if visible_y and not previous_y_names:
             x_current = pane.x_combo.currentData()
             default_row = next((row for row, (i, _) in enumerate(visible_y) if i != x_current), 0)
             pane.y_list_widget.item(default_row).setSelected(True)
         else:
             for row in range(pane.y_list_widget.count()):
                 item = pane.y_list_widget.item(row)
-                if item.data(QtCore.Qt.UserRole) in previous_y:
+                if item.text() in previous_y_names:
                     item.setSelected(True)
         pane.x_combo.blockSignals(False)
         pane.y_list_widget.blockSignals(False)
 
     def on_selection_changed(self):
-        if self.live_plot.isChecked() and not self.has_unloaded_lazy_selection():
-            self.redraw()
+        if self.live_plot.isChecked():
+            self.redraw_timer.start()
 
     def has_unloaded_lazy_selection(self):
-        for lazy_index in self.selected_lazy_indices():
-            if not self.lazy_entries[lazy_index].loaded:
+        for lazy_index, request in self.lazy_plot_column_requests().items():
+            entry = self.lazy_entries[lazy_index]
+            if (
+                not self.lazy_request_satisfied(entry, request)
+                and not (entry.attempted and not entry.loaded)
+            ):
                 return True
         return False
 
@@ -1940,29 +2575,115 @@ class MainWindow(QtWidgets.QMainWindow):
         pane = pane or self.selector_panes[0]
         return [item.data(QtCore.Qt.UserRole) for item in pane.y_list_widget.selectedItems()]
 
+    def lazy_plot_column_requests(self):
+        requests = {}
+        for pane in self.visible_selector_panes():
+            lazy_indices = self.selected_lazy_indices(pane)
+            if not lazy_indices:
+                continue
+            ix = pane.x_combo.currentData()
+            y_indices = self.selected_y_indices_original(pane)
+            if ix is None or not y_indices:
+                continue
+
+            reference = self.lazy_entries[lazy_indices[0]]
+            self.ensure_lazy_header(lazy_indices[0])
+            if not reference.columns:
+                for lazy_index in lazy_indices:
+                    requests[lazy_index] = None
+                continue
+
+            requested_names = []
+            for column_index in [ix] + y_indices:
+                if 0 <= column_index < len(reference.columns):
+                    name = reference.columns[column_index]
+                    if name not in requested_names:
+                        requested_names.append(name)
+
+            for lazy_index in lazy_indices:
+                if requests.get(lazy_index) is None and lazy_index in requests:
+                    continue
+                entry = self.lazy_entries[lazy_index]
+                self.ensure_lazy_header(lazy_index)
+                if not entry.columns:
+                    requests[lazy_index] = None
+                    continue
+                mapped = []
+                for name in requested_names:
+                    try:
+                        mapped.append(entry.columns.index(name))
+                    except ValueError:
+                        mapped = []
+                        break
+                previous = set(requests.get(lazy_index, ()))
+                requests[lazy_index] = tuple(sorted(previous.union(mapped)))
+        return requests
+
     def build_plot_data(self):
         plot_data = []
         pane_payloads = []
         total_table_count = 0
         for pane_index, pane in enumerate(self.visible_selector_panes()):
-            table_indices = self.selected_table_indices(pane=pane)
+            table_sources = []
+            lazy_indices = self.selected_lazy_indices(pane)
+            if lazy_indices:
+                for lazy_index in lazy_indices:
+                    entry = self.lazy_entries[lazy_index]
+                    for table_index in entry.table_indices:
+                        table_sources.append((table_index, entry))
+            else:
+                table_sources = [
+                    (table_index, None)
+                    for table_index in self.selected_table_indices(
+                        load=False,
+                        pane=pane,
+                    )
+                ]
             y_indices = self.selected_y_indices(pane)
             ix = pane.x_combo.currentData()
-            if ix is None or not y_indices or not table_indices:
+            if ix is None or not y_indices or not table_sources:
                 continue
-            pane_payloads.append((pane_index, table_indices, y_indices, ix))
-            total_table_count += len(table_indices)
+            pane_payloads.append((pane_index, table_sources, y_indices, ix))
+            total_table_count += len(table_sources)
 
         same_col = total_table_count > 1 or len(pane_payloads) > 1
-        for pane_index, table_indices, y_indices, ix in pane_payloads:
-            for it in table_indices:
+        for pane_index, table_sources, y_indices, ix in pane_payloads:
+            for it, entry in table_sources:
                 tab = self.tab_list[it]
-                if ix >= len(tab.columns):
+                tab_columns = [str(column) for column in tab.columns]
+                if entry is not None and entry.columns:
+                    if ix >= len(entry.columns):
+                        continue
+                    x_name = entry.columns[ix]
+                    try:
+                        actual_ix = tab_columns.index(x_name)
+                    except ValueError:
+                        continue
+                else:
+                    actual_ix = ix
+                if actual_ix >= len(tab.columns):
                     continue
                 for iy in y_indices:
-                    if iy >= len(tab.columns):
+                    if entry is not None and entry.columns:
+                        if iy >= len(entry.columns):
+                            continue
+                        y_name = entry.columns[iy]
+                        try:
+                            actual_iy = tab_columns.index(y_name)
+                        except ValueError:
+                            continue
+                    else:
+                        actual_iy = iy
+                    if actual_iy >= len(tab.columns):
                         continue
-                    idx = (it, ix, iy, str(tab.columns[ix]), str(tab.columns[iy]), tab.active_name)
+                    idx = (
+                        it,
+                        actual_ix,
+                        actual_iy,
+                        str(tab.columns[actual_ix]),
+                        str(tab.columns[actual_iy]),
+                        tab.active_name,
+                    )
                     pd = PlotData()
                     pd.fromIDs(self.tab_list, len(plot_data), idx, same_col, pipeline=None)
                     pd.pane_index = pane_index
@@ -1986,11 +2707,41 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def redraw(self):
         try:
-            if self.has_unloaded_lazy_selection():
+            if self.redraw_timer.isActive():
+                self.redraw_timer.stop()
+            column_requests = self.lazy_plot_column_requests()
+            missing = [
+                lazy_index
+                for lazy_index, request in column_requests.items()
+                if not self.lazy_request_satisfied(
+                    self.lazy_entries[lazy_index],
+                    request,
+                )
+                and not (
+                    self.lazy_entries[lazy_index].attempted
+                    and not self.lazy_entries[lazy_index].loaded
+                )
+            ]
+            if missing:
+                pending = self.pending_lazy_indices(
+                    missing,
+                    column_requests=column_requests,
+                )
+                self.lazy_selected_batch = set(missing)
                 self.plot_after_lazy_load = True
-                self.begin_lazy_load_batch(len(self.pending_lazy_indices(self.selected_lazy_indices())))
-                self.selected_table_indices(load=True)
-                self.statusBar().showMessage("Loading selected files before plotting ...", 8000)
+                self.begin_lazy_load_batch(len(pending))
+                for lazy_index in pending:
+                    self.ensure_lazy_loaded(
+                        lazy_index,
+                        show_warning=False,
+                        channel_indices=column_requests[lazy_index],
+                    )
+                self.statusBar().showMessage(
+                    "Loading selected X/Y variables from {:,} files ...".format(
+                        len(missing)
+                    ),
+                    8000,
+                )
                 return
             self.plot_data = self.build_plot_data()
             self.canvas.plot_data(
@@ -2003,6 +2754,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 show_legend=self.legend_check.isChecked(),
                 line_width=self.line_width_spin.value(),
                 marker=self.marker_symbol(),
+                axis_limits=self.axis_limits,
             )
             n_curves = len(self.plot_data)
             n_points = sum(len(pd.y) for pd in self.plot_data)
@@ -2055,7 +2807,105 @@ class MainWindow(QtWidgets.QMainWindow):
         self.update_table_preview()
         self.update_file_info()
 
+    def open_calculation_dialog(self):
+        panes = self.visible_selector_panes()
+        if not panes:
+            return
+        pane = self.active_selector_pane if self.active_selector_pane in panes else panes[0]
+        unloaded = [
+            lazy_index for lazy_index in self.selected_lazy_indices(pane)
+            if not self.lazy_entries[lazy_index].full_loaded
+        ]
+        if unloaded:
+            self.statusBar().showMessage(
+                "Use Load full selected before creating a calculated variable",
+                10000,
+            )
+            return
+
+        table_indices = self.selected_table_indices(load=False, pane=pane)
+        if len(table_indices) != 1:
+            QtWidgets.QMessageBox.information(
+                self,
+                "Mathematical operation",
+                "Select one loaded table or one Bladed variable group.",
+            )
+            return
+
+        table_index = table_indices[0]
+        tab = self.tab_list[table_index]
+        selected_columns = [
+            str(tab.columns[index])
+            for index in self.selected_y_indices_original(pane)
+            if isinstance(index, int) and 0 <= index < len(tab.columns)
+        ]
+        dialog = CalculationDialog(
+            tab.columns,
+            selected_columns=selected_columns,
+            parent=self,
+        )
+        if dialog.exec() != QtWidgets.QDialog.Accepted:
+            return
+
+        result_name, expression = dialog.values()
+        if result_name in [str(column) for column in tab.data.columns]:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Mathematical operation",
+                "A variable named '{}' already exists.".format(result_name),
+            )
+            return
+
+        try:
+            result = evaluate_math_expression(tab.data, expression)
+            tab.addColumn(
+                result_name,
+                result,
+                i=len(tab.data.columns) - 1,
+                sFormula=expression,
+            )
+        except Exception as exc:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Mathematical operation",
+                "{}: {}".format(type(exc).__name__, exc),
+            )
+            return
+
+        new_column_index = len(tab.data.columns) - 1
+        pane.column_filter.blockSignals(True)
+        pane.column_filter.clear()
+        pane.column_filter.blockSignals(False)
+        self.populate_columns(pane)
+        pane.y_list_widget.blockSignals(True)
+        pane.y_list_widget.clearSelection()
+        for row in range(pane.y_list_widget.count()):
+            item = pane.y_list_widget.item(row)
+            if item.data(QtCore.Qt.UserRole) == new_column_index:
+                item.setSelected(True)
+                pane.y_list_widget.setCurrentItem(item)
+                pane.y_list_widget.scrollToItem(item)
+                break
+        pane.y_list_widget.blockSignals(False)
+        self.update_table_preview()
+        self.detail_tabs.setCurrentWidget(self.table_view)
+        self.redraw()
+        self.statusBar().showMessage(
+            "Added calculated variable '{}' to {}".format(result_name, tab.nickname),
+            10000,
+        )
+
     def standardize_units_si(self):
+        partial = [
+            lazy_index for lazy_index in self.selected_lazy_indices()
+            if not self.lazy_entries[lazy_index].full_loaded
+        ]
+        if partial:
+            self.statusBar().showMessage(
+                "Use Load full selected before standardizing table units",
+                10000,
+            )
+            return
         indices = self.selected_table_indices(load=False)
         if not indices:
             indices = list(range(len(self.tab_list)))
@@ -2087,7 +2937,46 @@ class MainWindow(QtWidgets.QMainWindow):
         self.canvas.clear_plot()
         self.plot_data = []
 
+    def open_axis_limits_dialog(self):
+        dialog = AxisLimitsDialog(
+            self.axis_limits,
+            logx=self.logx_check.isChecked(),
+            logy=self.logy_check.isChecked(),
+            parent=self,
+        )
+        if dialog.exec() != QtWidgets.QDialog.Accepted:
+            return
+        self.axis_limits = dialog.values()
+        self.update_axis_limits_button()
+        self.redraw()
+
+    def update_axis_limits_button(self):
+        active = any(value is not None for value in self.axis_limits.values())
+        self.axis_limits_button.setProperty("limitsActive", active)
+        values = []
+        for label, minimum_key, maximum_key in (
+            ("X", "xmin", "xmax"),
+            ("Y", "ymin", "ymax"),
+        ):
+            minimum = self.axis_limits.get(minimum_key)
+            maximum = self.axis_limits.get(maximum_key)
+            if minimum is not None or maximum is not None:
+                values.append(
+                    "{} [{}, {}]".format(
+                        label,
+                        "auto" if minimum is None else "{:.6g}".format(minimum),
+                        "auto" if maximum is None else "{:.6g}".format(maximum),
+                    )
+                )
+        self.axis_limits_button.setToolTip(
+            "Set X and Y plot limits" if not values else "; ".join(values)
+        )
+        self.axis_limits_button.style().unpolish(self.axis_limits_button)
+        self.axis_limits_button.style().polish(self.axis_limits_button)
+
     def auto_range(self):
+        self.axis_limits = {key: None for key in ("xmin", "xmax", "ymin", "ymax")}
+        self.update_axis_limits_button()
         for plot in self.canvas._plots:
             plot.autoRange()
 
@@ -2113,8 +3002,13 @@ class MainWindow(QtWidgets.QMainWindow):
             lines = []
             for lazy_index in lazy_indices:
                 entry = self.lazy_entries[lazy_index]
-                if entry.loaded:
+                if entry.full_loaded:
                     status = "loaded"
+                elif entry.loaded:
+                    status = "partial ({}/{} variables)".format(
+                        len(entry.loaded_column_indices),
+                        len(entry.columns) if entry.columns else "?",
+                    )
                 elif entry.loading:
                     status = "loading"
                 elif entry.attempted:
@@ -2155,7 +3049,24 @@ class MainWindow(QtWidgets.QMainWindow):
             self.stats_text.clear()
             return
         lines = []
+        regular_plot = self.plot_type_combo.currentText() == "Regular"
         for pd in self.plot_data:
+            if regular_plot and not pd.yIsString and not pd.yIsDate:
+                n = pd.n0()[0]
+                y_min = pd.y0Min()[0]
+                y_mean = pd.y0Mean()[0]
+                y_max = pd.y0Max()[0]
+                y_std = pd.y0Std()[0]
+                if n == 0:
+                    continue
+                lines.append(pd.syl or pd.sy)
+                lines.append("  n    = {:,}".format(n))
+                lines.append("  min  = {:.6g}".format(y_min))
+                lines.append("  mean = {:.6g}".format(y_mean))
+                lines.append("  max  = {:.6g}".format(y_max))
+                lines.append("  std  = {:.6g}".format(y_std))
+                lines.append("")
+                continue
             try:
                 _, y = _finite_xy(pd.x, pd.y)
             except Exception:
@@ -2224,6 +3135,16 @@ class MainWindow(QtWidgets.QMainWindow):
             self.show_exception("Failed to export plot", exc)
 
     def export_selected_table(self):
+        partial = [
+            lazy_index for lazy_index in self.selected_lazy_indices()
+            if not self.lazy_entries[lazy_index].full_loaded
+        ]
+        if partial:
+            self.statusBar().showMessage(
+                "Use Load full selected before exporting a complete table",
+                10000,
+            )
+            return
         indices = self.selected_table_indices()
         if not indices:
             return
