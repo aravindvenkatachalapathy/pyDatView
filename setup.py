@@ -5,7 +5,7 @@ setup(
     version='0.5',
     description='Qt GUI to load, compare, and plot engineering data',
     url='https://github.com/aravindvenkatachalapathy/pyDatView',
-    author='Emmanuel Branlard',
+    author='Aravind Venkatachalapathy',
     author_email='lastname@gmail.com',
     license='MIT',
     python_requires='>=3.9',
