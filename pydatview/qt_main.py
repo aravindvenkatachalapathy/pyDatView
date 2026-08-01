@@ -86,6 +86,8 @@ class SelectorPane:
     column_filter: object
     x_combo: object
     y_list_widget: object
+    display_columns: list = field(default_factory=list)
+    bladed_project_mode: bool = False
 
 
 class LazyLoadWorker(QtCore.QObject):
@@ -1391,7 +1393,7 @@ class MainWindow(QtWidgets.QMainWindow):
         table_list_widget = QtWidgets.QListWidget()
         table_list_widget.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
         layout.addWidget(table_list_widget, 2)
-        bladed_dataset_label = QtWidgets.QLabel("BLADED VARIABLES")
+        bladed_dataset_label = QtWidgets.QLabel("BLADED VARIABLE GROUP")
         bladed_dataset_label.setProperty("sectionLabel", True)
         bladed_dataset_label.setVisible(False)
         layout.addWidget(bladed_dataset_label)
@@ -2362,7 +2364,25 @@ class MainWindow(QtWidgets.QMainWindow):
                     pane.table_list_widget.addItem(item)
                     self.lazy_item_widgets.setdefault(i, []).append(item)
             else:
+                displayed_projects = set()
                 for i, tab in enumerate(self.tab_list):
+                    if self.is_bladed_project_path(tab.filename):
+                        project_path = os.path.abspath(tab.filename)
+                        if project_path in displayed_projects:
+                            continue
+                        displayed_projects.add(project_path)
+                        group_count = sum(
+                            1 for candidate in self.tab_list
+                            if os.path.abspath(candidate.filename) == project_path
+                        )
+                        item = QtWidgets.QListWidgetItem(os.path.basename(tab.filename))
+                        item.setToolTip("{} Bladed variable groups".format(group_count))
+                        item.setData(
+                            QtCore.Qt.UserRole,
+                            ("bladed_project", project_path),
+                        )
+                        pane.table_list_widget.addItem(item)
+                        continue
                     item = QtWidgets.QListWidgetItem("{}  ({})".format(names[i], tab.shapestring))
                     item.setData(QtCore.Qt.UserRole, ("table", i))
                     pane.table_list_widget.addItem(item)
@@ -2384,18 +2404,59 @@ class MainWindow(QtWidgets.QMainWindow):
                     seen.add(data[1])
         return indices
 
+    @staticmethod
+    def is_bladed_project_path(path):
+        return bool(path) and os.path.splitext(path)[1].lower() == ".$pj"
+
+    def selected_bladed_project_paths(self, pane):
+        paths = []
+        seen = set()
+        for item in pane.table_list_widget.selectedItems():
+            data = item.data(QtCore.Qt.UserRole)
+            path = None
+            if isinstance(data, tuple) and data[0] == "bladed_project":
+                path = data[1]
+            elif isinstance(data, tuple) and data[0] == "lazy":
+                entry = self.lazy_entries[data[1]]
+                if entry.loaded and self.is_bladed_project_path(entry.path):
+                    path = entry.path
+            elif isinstance(data, tuple) and data[0] == "table":
+                tab = self.tab_list[data[1]]
+                if self.is_bladed_project_path(tab.filename):
+                    path = tab.filename
+            if path:
+                normalized = os.path.abspath(path)
+                if normalized not in seen:
+                    paths.append(normalized)
+                    seen.add(normalized)
+        return paths
+
+    def selected_bladed_group(self, pane):
+        if pane.bladed_dataset_combo.isHidden():
+            return "__all__"
+        return pane.bladed_dataset_combo.currentData() or "__all__"
+
+    def bladed_project_table_indices(self, pane, group=None):
+        paths = set(self.selected_bladed_project_paths(pane))
+        if not paths:
+            return []
+        group = self.selected_bladed_group(pane) if group is None else group
+        return [
+            i for i, tab in enumerate(self.tab_list)
+            if os.path.abspath(tab.filename) in paths
+            and (group == "__all__" or tab.nickname == group)
+        ]
+
     def selected_table_indices(self, load=True, show_warning=False, pane=None):
         panes = [pane] if pane is not None else self.visible_selector_panes()
         indices = []
         seen = set()
         for p in panes:
-            if not p.bladed_dataset_combo.isHidden():
-                table_index = p.bladed_dataset_combo.currentData()
-                if isinstance(table_index, int) and 0 <= table_index < len(self.tab_list):
-                    if table_index not in seen:
-                        indices.append(table_index)
-                        seen.add(table_index)
-                    continue
+            project_paths = set(self.selected_bladed_project_paths(p))
+            for table_index in self.bladed_project_table_indices(p):
+                if table_index not in seen:
+                    indices.append(table_index)
+                    seen.add(table_index)
             for item in p.table_list_widget.selectedItems():
                 data = item.data(QtCore.Qt.UserRole)
                 if isinstance(data, tuple) and data[0] == "table":
@@ -2404,6 +2465,8 @@ class MainWindow(QtWidgets.QMainWindow):
                         seen.add(data[1])
                 elif isinstance(data, tuple) and data[0] == "lazy":
                     entry = self.lazy_entries[data[1]]
+                    if os.path.abspath(entry.path) in project_paths:
+                        continue
                     if entry.loaded:
                         for table_index in entry.table_indices:
                             if table_index not in seen:
@@ -2427,40 +2490,25 @@ class MainWindow(QtWidgets.QMainWindow):
         self.on_selection_changed()
 
     def populate_bladed_datasets(self, pane):
-        previous_table_index = pane.bladed_dataset_combo.currentData()
-        table_indices = []
-        selected_items = pane.table_list_widget.selectedItems()
-        if len(selected_items) == 1:
-            data = selected_items[0].data(QtCore.Qt.UserRole)
-            if isinstance(data, tuple) and data[0] == "lazy":
-                entry = self.lazy_entries[data[1]]
-                is_bladed = getattr(entry.file_format, "name", "") == "Bladed output file"
-                is_project = os.path.splitext(entry.path)[1].lower() == ".$pj"
-                if is_bladed and is_project and entry.loaded:
-                    table_indices = list(entry.table_indices)
-            elif isinstance(data, tuple) and data[0] == "table":
-                table_index = data[1]
-                tab = self.tab_list[table_index]
-                if os.path.splitext(tab.filename)[1].lower() == ".$pj":
-                    table_indices = [
-                        i for i, candidate in enumerate(self.tab_list)
-                        if candidate.filename == tab.filename
-                    ]
+        previous_group = pane.bladed_dataset_combo.currentData()
+        table_indices = self.bladed_project_table_indices(pane, group="__all__")
+        groups = []
+        for table_index in table_indices:
+            group = self.tab_list[table_index].nickname
+            if group not in groups:
+                groups.append(group)
 
         pane.bladed_dataset_combo.blockSignals(True)
         pane.bladed_dataset_combo.clear()
-        for table_index in table_indices:
-            tab = self.tab_list[table_index]
-            label = "{}  ({})".format(tab.nickname, tab.shapestring)
-            pane.bladed_dataset_combo.addItem(label, table_index)
-        if table_indices:
-            selected_index = (
-                previous_table_index
-                if previous_table_index in table_indices
-                else table_indices[0]
+        if groups:
+            pane.bladed_dataset_combo.addItem("All variable groups", "__all__")
+            for group in groups:
+                pane.bladed_dataset_combo.addItem(group, group)
+            selected_group = previous_group if previous_group in groups else "__all__"
+            pane.bladed_dataset_combo.setCurrentIndex(
+                pane.bladed_dataset_combo.findData(selected_group)
             )
-            pane.bladed_dataset_combo.setCurrentIndex(table_indices.index(selected_index))
-        visible = bool(table_indices)
+        visible = bool(groups)
         pane.bladed_dataset_label.setVisible(visible)
         pane.bladed_dataset_combo.setVisible(visible)
         pane.bladed_dataset_combo.blockSignals(False)
@@ -2484,20 +2532,29 @@ class MainWindow(QtWidgets.QMainWindow):
         lazy_indices = self.selected_lazy_indices(pane)
         indices = []
         columns = []
+        project_indices = self.bladed_project_table_indices(pane)
+        pane.bladed_project_mode = bool(project_indices)
+        if project_indices:
+            for table_index in project_indices:
+                for column in self.tab_list[table_index].columns:
+                    column = str(column)
+                    if column not in columns:
+                        columns.append(column)
         if lazy_indices:
             lazy_index = lazy_indices[0]
             entry = self.lazy_entries[lazy_index]
             self.ensure_lazy_header(lazy_index)
             if entry.columns:
                 columns = list(entry.columns)
-            elif entry.loaded:
+            elif entry.loaded and not project_indices:
                 indices = self.selected_table_indices(load=False, pane=pane)
-        if not lazy_indices:
+        if not lazy_indices and not project_indices:
             indices = self.selected_table_indices(load=False, pane=pane)
         if not indices and len(self.tab_list) > 0 and not self.lazy_entries:
             indices = [0]
         if indices and not columns:
             columns = list(self.tab_list[indices[0]].columns)
+        pane.display_columns = list(columns)
         all_columns = [(i, str(col)) for i, col in enumerate(columns)]
         text_filter = pane.column_filter.text().strip().lower()
         visible_y = [(i, col) for i, col in all_columns
@@ -2626,7 +2683,10 @@ class MainWindow(QtWidgets.QMainWindow):
         for pane_index, pane in enumerate(self.visible_selector_panes()):
             table_sources = []
             lazy_indices = self.selected_lazy_indices(pane)
-            if lazy_indices:
+            project_indices = self.bladed_project_table_indices(pane)
+            if project_indices:
+                table_sources = [(table_index, None) for table_index in project_indices]
+            elif lazy_indices:
                 for lazy_index in lazy_indices:
                     entry = self.lazy_entries[lazy_index]
                     for table_index in entry.table_indices:
@@ -2643,15 +2703,37 @@ class MainWindow(QtWidgets.QMainWindow):
             ix = pane.x_combo.currentData()
             if ix is None or not y_indices or not table_sources:
                 continue
-            pane_payloads.append((pane_index, table_sources, y_indices, ix))
-            total_table_count += len(table_sources)
+            pane_payloads.append((
+                pane_index,
+                table_sources,
+                y_indices,
+                ix,
+                pane.bladed_project_mode,
+                list(pane.display_columns),
+            ))
+            if pane.bladed_project_mode:
+                total_table_count += len({
+                    os.path.abspath(self.tab_list[table_index].filename)
+                    for table_index, _entry in table_sources
+                })
+            else:
+                total_table_count += len(table_sources)
 
         same_col = total_table_count > 1 or len(pane_payloads) > 1
-        for pane_index, table_sources, y_indices, ix in pane_payloads:
+        for pane_index, table_sources, y_indices, ix, project_mode, display_columns in pane_payloads:
+            seen_project_curves = set()
             for it, entry in table_sources:
                 tab = self.tab_list[it]
                 tab_columns = [str(column) for column in tab.columns]
-                if entry is not None and entry.columns:
+                if project_mode:
+                    if ix >= len(display_columns):
+                        continue
+                    x_name = display_columns[ix]
+                    try:
+                        actual_ix = tab_columns.index(x_name)
+                    except ValueError:
+                        continue
+                elif entry is not None and entry.columns:
                     if ix >= len(entry.columns):
                         continue
                     x_name = entry.columns[ix]
@@ -2664,7 +2746,19 @@ class MainWindow(QtWidgets.QMainWindow):
                 if actual_ix >= len(tab.columns):
                     continue
                 for iy in y_indices:
-                    if entry is not None and entry.columns:
+                    if project_mode:
+                        if iy >= len(display_columns):
+                            continue
+                        y_name = display_columns[iy]
+                        try:
+                            actual_iy = tab_columns.index(y_name)
+                        except ValueError:
+                            continue
+                        curve_key = (os.path.abspath(tab.filename), y_name)
+                        if curve_key in seen_project_curves:
+                            continue
+                        seen_project_curves.add(curve_key)
+                    elif entry is not None and entry.columns:
                         if iy >= len(entry.columns):
                             continue
                         y_name = entry.columns[iy]
@@ -2687,6 +2781,8 @@ class MainWindow(QtWidgets.QMainWindow):
                     pd = PlotData()
                     pd.fromIDs(self.tab_list, len(plot_data), idx, same_col, pipeline=None)
                     pd.pane_index = pane_index
+                    if project_mode:
+                        pd.st = os.path.basename(tab.filename)
                     self.apply_plot_type(pd)
                     if same_col:
                         pd.syl = "Set {}: {} - {}".format(pane_index + 1, pd.st, pd.sy)
@@ -2788,6 +2884,13 @@ class MainWindow(QtWidgets.QMainWindow):
             item = pane.table_list_widget.item(row)
             data = item.data(QtCore.Qt.UserRole)
             if isinstance(data, tuple) and data == ("table", table_index):
+                target_row = row
+                break
+            if (
+                isinstance(data, tuple)
+                and data[0] == "bladed_project"
+                and os.path.abspath(self.tab_list[table_index].filename) == data[1]
+            ):
                 target_row = row
                 break
             if isinstance(data, tuple) and data[0] == "lazy":
