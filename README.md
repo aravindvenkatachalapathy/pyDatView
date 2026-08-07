@@ -141,6 +141,11 @@ Selecting another variable expands the cache only by the variables required
 for the plot. Use **Load full selected** when a complete dataframe is required
 for calculations, unit conversion, table preview, or table export.
 
+Use **Tools > Standardize units > Wind Energy / OpenFAST units** to convert
+loaded channels to common wind-energy display units, including `Nm` to `kNm`,
+`N` to `kN`, `W` to `kW`, `rad` to `deg`, and `rad/s` to `rpm`. The SI action
+in the same menu converts these channels back to SI units.
+
 Formats without lightweight channel headers use the normal full-file loader.
 
 Enable **Keep files from previous scans** in the scan dialog to append new

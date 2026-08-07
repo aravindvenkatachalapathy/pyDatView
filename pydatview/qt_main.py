@@ -1946,12 +1946,18 @@ class MainWindow(QtWidgets.QMainWindow):
         self.autorange_action.triggered.connect(self.auto_range)
         self.axis_limits_action = view_menu.addAction("Axis limits")
         self.axis_limits_action.triggered.connect(self.open_axis_limits_dialog)
-        self.standardize_si_action = view_menu.addAction("Standardize units to SI")
-        self.standardize_si_action.triggered.connect(self.standardize_units_si)
         view_export_plot_action = view_menu.addAction("Export plot")
         view_export_plot_action.triggered.connect(self.export_plot_image)
 
         tools_menu = self.menuBar().addMenu("&Tools")
+        units_menu = tools_menu.addMenu("Standardize units")
+        self.standardize_we_action = units_menu.addAction(
+            "Wind Energy / OpenFAST units"
+        )
+        self.standardize_we_action.triggered.connect(self.standardize_units_we)
+        self.standardize_si_action = units_menu.addAction("SI units")
+        self.standardize_si_action.triggered.connect(self.standardize_units_si)
+        tools_menu.addSeparator()
         self.math_action = tools_menu.addAction("Mathematical operation")
         self.math_action.triggered.connect(self.open_calculation_dialog)
 
@@ -2056,6 +2062,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.scan_action,
             self.autorange_action,
             self.axis_limits_action,
+            self.standardize_we_action,
             self.standardize_si_action,
             self.export_table_action,
             self.export_plot_action,
@@ -3442,7 +3449,7 @@ class MainWindow(QtWidgets.QMainWindow):
             10000,
         )
 
-    def standardize_units_si(self):
+    def standardize_units(self, flavor, label):
         partial = [
             lazy_index for lazy_index in self.selected_lazy_indices()
             if not self.lazy_entries[lazy_index].full_loaded
@@ -3464,21 +3471,34 @@ class MainWindow(QtWidgets.QMainWindow):
         for it in indices:
             tab = self.tab_list[it]
             before = list(tab.data.columns)
-            tab.changeUnits(data={"flavor": "SI"})
+            tab.changeUnits(data={"flavor": flavor})
             after = list(tab.data.columns)
             if before != after:
                 changed += 1
-                print("[pyDatView] Standardized units to SI: {}".format(tab.active_name))
+                print(
+                    "[pyDatView] Standardized units to {}: {}".format(
+                        label, tab.active_name
+                    )
+                )
 
-        self.populate_columns()
+        for pane in self.visible_selector_panes():
+            self.populate_columns(pane)
         self.update_table_preview()
         self.update_file_info()
         if self.live_plot.isChecked() and not self.has_unloaded_lazy_selection():
             self.redraw()
         self.statusBar().showMessage(
-            "Standardized units to SI for {:,} loaded table(s), {:,} changed".format(len(indices), changed),
+            "Standardized units to {} for {:,} loaded table(s), {:,} changed".format(
+                label, len(indices), changed
+            ),
             12000,
         )
+
+    def standardize_units_we(self):
+        self.standardize_units("WE", "Wind Energy / OpenFAST")
+
+    def standardize_units_si(self):
+        self.standardize_units("SI", "SI")
 
     def clear(self):
         self.canvas.clear_plot()

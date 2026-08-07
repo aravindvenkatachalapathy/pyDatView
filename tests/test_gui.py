@@ -28,6 +28,42 @@ class TestGUI(unittest.TestCase):
         window.close()
         self.app.processEvents()
 
+    def test_standardize_wind_energy_openfast_units(self):
+        from pydatview.Tables import Table
+        from pydatview.qt_main import MainWindow
+
+        window = MainWindow()
+        window.tab_list.append(Table(
+            data=pd.DataFrame({
+                "Time [s]": [0.0, 1.0],
+                "Torque [Nm]": [2500.0, 5000.0],
+                "Pitch [rad]": [0.0, np.pi / 2.0],
+                "Power [W]": [1.0e6, 2.0e6],
+                "Speed [rad/s]": [0.0, 2.0 * np.pi / 60.0],
+            }),
+            name="openfast",
+            filename="openfast.out",
+        ))
+        window.populate_tables()
+
+        self.assertEqual(
+            window.standardize_we_action.text(),
+            "Wind Energy / OpenFAST units",
+        )
+        window.standardize_we_action.trigger()
+        converted = window.tab_list[0].data
+        self.assertIn("Torque [kNm]", converted.columns)
+        self.assertIn("Pitch [deg]", converted.columns)
+        self.assertIn("Power [kW]", converted.columns)
+        self.assertIn("Speed [rpm]", converted.columns)
+        np.testing.assert_allclose(converted["Torque [kNm]"], [2.5, 5.0])
+        np.testing.assert_allclose(converted["Pitch [deg]"], [0.0, 90.0])
+        np.testing.assert_allclose(converted["Power [kW]"], [1000.0, 2000.0])
+        np.testing.assert_allclose(converted["Speed [rpm]"], [0.0, 1.0])
+
+        window.close()
+        self.app.processEvents()
+
     def test_scanned_fast_plot_uses_partial_channel_cache(self):
         import pydatview.io as weio
         from pydatview.Tables import TableList
