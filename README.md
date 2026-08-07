@@ -141,10 +141,10 @@ Selecting another variable expands the cache only by the variables required
 for the plot. Use **Load full selected** when a complete dataframe is required
 for calculations, unit conversion, table preview, or table export.
 
-Use **Tools > Standardize units > Wind Energy / OpenFAST units** to convert
-loaded channels to common wind-energy display units, including `Nm` to `kNm`,
-`N` to `kN`, `W` to `kW`, `rad` to `deg`, and `rad/s` to `rpm`. The SI action
-in the same menu converts these channels back to SI units.
+Use **Tools > Standardize units...** and choose **Wind Energy / OpenFAST** to
+convert loaded channels to common wind-energy display units, including `Nm`
+to `kNm`, `N` to `kN`, `W` to `kW`, `rad` to `deg`, and `rad/s` to `rpm`.
+Choose **SI** in the same dialog to convert these channels back to SI units.
 
 Formats without lightweight channel headers use the normal full-file loader.
 
@@ -157,6 +157,8 @@ current file selection are retained; duplicate paths are ignored.
 Moving the pointer over a plot shows its X and Y coordinates in the status
 bar. Enable **Zoom area** and drag a rectangle over the required plot or
 subplot. Use **View > Auto range** to restore the complete data range.
+Use **View > Increase font size** or **Decrease font size** to adjust interface
+text without changing plot-axis typography.
 
 The Plot selector includes **Compare**, with Relative, absolute-relative,
 Ratio, Absolute, and Y-Y comparisons against the first selected series in

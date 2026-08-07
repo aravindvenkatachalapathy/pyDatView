@@ -1161,6 +1161,35 @@ class AxisLimitsDialog(QtWidgets.QDialog):
         return dict(self._limits)
 
 
+class StandardizeUnitsDialog(QtWidgets.QDialog):
+    def __init__(self, initial_flavor="WE", parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Standardize units")
+        self.setMinimumWidth(390)
+
+        root = QtWidgets.QVBoxLayout(self)
+        form = QtWidgets.QFormLayout()
+        self.target_combo = QtWidgets.QComboBox()
+        self.target_combo.addItem("Wind Energy / OpenFAST", "WE")
+        self.target_combo.addItem("SI", "SI")
+        target_index = self.target_combo.findData(initial_flavor)
+        self.target_combo.setCurrentIndex(max(0, target_index))
+        form.addRow("Target units", self.target_combo)
+        root.addLayout(form)
+
+        buttons = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Cancel)
+        self.apply_button = buttons.addButton(
+            "Apply", QtWidgets.QDialogButtonBox.AcceptRole
+        )
+        self.apply_button.setObjectName("primaryButton")
+        root.addWidget(buttons)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+
+    def target_flavor(self):
+        return self.target_combo.currentData()
+
+
 class ScanDialog(QtWidgets.QDialog):
     def __init__(self, file_formats, parent=None, settings=None):
         super().__init__(parent)
@@ -1581,7 +1610,8 @@ class MainWindow(QtWidgets.QMainWindow):
         super().__init__()
         self.setWindowTitle("pyDatView Qt")
         ui_font = QtGui.QFont(self.font())
-        ui_font.setPointSize(max(7, ui_font.pointSize() - 2))
+        self._ui_font_size = max(7, ui_font.pointSize() - 2)
+        ui_font.setPointSize(self._ui_font_size)
         self.setFont(ui_font)
         self.resize(1280, 820)
         self.settings = QtCore.QSettings("NREL", "pyDatView")
@@ -1953,9 +1983,11 @@ class MainWindow(QtWidgets.QMainWindow):
             QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter
         )
         self.coordinate_label.setFixedWidth(300)
-        self.coordinate_label.setFont(
-            QtGui.QFontDatabase.systemFont(QtGui.QFontDatabase.FixedFont)
+        coordinate_font = QtGui.QFontDatabase.systemFont(
+            QtGui.QFontDatabase.FixedFont
         )
+        coordinate_font.setPointSize(self._ui_font_size)
+        self.coordinate_label.setFont(coordinate_font)
         self.statusBar().addPermanentWidget(self.coordinate_label)
         self._apply_light_borders()
 
@@ -2081,7 +2113,6 @@ class MainWindow(QtWidgets.QMainWindow):
                 border: 1px solid #c4ced8;
                 border-radius: 3px;
                 padding: 2px 4px;
-                font-size: 10px;
                 font-weight: 700;
             }
             QLabel#statusChip {
@@ -2365,17 +2396,29 @@ class MainWindow(QtWidgets.QMainWindow):
         self.zoom_area_action.toggled.connect(self.on_zoom_area_toggled)
         self.axis_limits_action = view_menu.addAction("Axis limits")
         self.axis_limits_action.triggered.connect(self.open_axis_limits_dialog)
+        view_menu.addSeparator()
+        self.increase_font_action = view_menu.addAction("Increase font size")
+        self.increase_font_action.setShortcuts([
+            QtGui.QKeySequence("Ctrl++"),
+            QtGui.QKeySequence("Ctrl+="),
+        ])
+        self.increase_font_action.triggered.connect(
+            lambda: self.change_ui_font_size(1)
+        )
+        self.decrease_font_action = view_menu.addAction("Decrease font size")
+        self.decrease_font_action.setShortcut(QtGui.QKeySequence("Ctrl+-"))
+        self.decrease_font_action.triggered.connect(
+            lambda: self.change_ui_font_size(-1)
+        )
+        view_menu.addSeparator()
         view_export_plot_action = view_menu.addAction("Export plot")
         view_export_plot_action.triggered.connect(self.export_plot_image)
 
         tools_menu = self.menuBar().addMenu("&Tools")
-        units_menu = tools_menu.addMenu("Standardize units")
-        self.standardize_we_action = units_menu.addAction(
-            "Wind Energy / OpenFAST units"
+        self.standardize_units_action = tools_menu.addAction("Standardize units...")
+        self.standardize_units_action.triggered.connect(
+            self.open_standardize_units_dialog
         )
-        self.standardize_we_action.triggered.connect(self.standardize_units_we)
-        self.standardize_si_action = units_menu.addAction("SI units")
-        self.standardize_si_action.triggered.connect(self.standardize_units_si)
         tools_menu.addSeparator()
         self.math_action = tools_menu.addAction("Mathematical operation")
         self.math_action.triggered.connect(self.open_calculation_dialog)
@@ -2498,8 +2541,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.autorange_action,
             self.zoom_area_action,
             self.axis_limits_action,
-            self.standardize_we_action,
-            self.standardize_si_action,
+            self.standardize_units_action,
             self.export_table_action,
             self.export_plot_action,
             self.math_action,
@@ -3969,6 +4011,21 @@ class MainWindow(QtWidgets.QMainWindow):
             12000,
         )
 
+    def open_standardize_units_dialog(self):
+        initial_flavor = str(self.settings.value("units/target", "WE"))
+        dialog = StandardizeUnitsDialog(
+            initial_flavor=initial_flavor,
+            parent=self,
+        )
+        if dialog.exec() != QtWidgets.QDialog.Accepted:
+            return
+        flavor = dialog.target_flavor()
+        self.settings.setValue("units/target", flavor)
+        if flavor == "SI":
+            self.standardize_units_si()
+        else:
+            self.standardize_units_we()
+
     def standardize_units_we(self):
         self.standardize_units("WE", "Wind Energy / OpenFAST")
 
@@ -4025,6 +4082,21 @@ class MainWindow(QtWidgets.QMainWindow):
     def on_zoom_area_toggled(self, enabled):
         self.zoom_area_button.setChecked(enabled)
         self.canvas.set_zoom_mode(enabled)
+
+    def change_ui_font_size(self, delta):
+        new_size = max(7, min(20, self._ui_font_size + int(delta)))
+        if new_size == self._ui_font_size:
+            return
+        self._ui_font_size = new_size
+        font = QtGui.QFont(self.font())
+        font.setPointSize(new_size)
+        self.setFont(font)
+        coordinate_font = QtGui.QFont(self.coordinate_label.font())
+        coordinate_font.setPointSize(new_size)
+        self.coordinate_label.setFont(coordinate_font)
+        self.statusBar().showMessage(
+            "Interface font size: {} pt".format(new_size), 5000
+        )
 
     def marker_symbol(self):
         return {

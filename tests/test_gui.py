@@ -29,12 +29,26 @@ class TestGUI(unittest.TestCase):
             window.font().pointSize(),
             max(7, self.app.font().pointSize() - 2),
         )
+        initial_font_size = window.font().pointSize()
+        window.increase_font_action.trigger()
+        self.assertEqual(window.font().pointSize(), initial_font_size + 1)
+        self.assertEqual(
+            window.coordinate_label.font().pointSize(), initial_font_size + 1
+        )
+        window.decrease_font_action.trigger()
+        self.assertEqual(window.font().pointSize(), initial_font_size)
         window.close()
         self.app.processEvents()
 
     def test_standardize_wind_energy_openfast_units(self):
+        from unittest.mock import patch
+
         from pydatview.Tables import Table
-        from pydatview.qt_main import MainWindow
+        from pydatview.qt_main import (
+            MainWindow,
+            QtWidgets,
+            StandardizeUnitsDialog,
+        )
 
         window = MainWindow()
         window.tab_list.append(Table(
@@ -50,11 +64,24 @@ class TestGUI(unittest.TestCase):
         ))
         window.populate_tables()
 
-        self.assertEqual(
-            window.standardize_we_action.text(),
-            "Wind Energy / OpenFAST units",
+        unit_dialog = StandardizeUnitsDialog(initial_flavor="SI", parent=window)
+        self.assertEqual(unit_dialog.target_flavor(), "SI")
+        unit_dialog.target_combo.setCurrentIndex(
+            unit_dialog.target_combo.findData("WE")
         )
-        window.standardize_we_action.trigger()
+        unit_dialog.apply_button.click()
+        self.assertEqual(unit_dialog.result(), QtWidgets.QDialog.Accepted)
+
+        self.assertEqual(
+            window.standardize_units_action.text(),
+            "Standardize units...",
+        )
+        with patch("pydatview.qt_main.StandardizeUnitsDialog") as dialog_class:
+            dialog = dialog_class.return_value
+            dialog.exec.return_value = QtWidgets.QDialog.Accepted
+            dialog.target_flavor.return_value = "WE"
+            window.standardize_units_action.trigger()
+            dialog_class.assert_called_once()
         converted = window.tab_list[0].data
         self.assertIn("Torque [kNm]", converted.columns)
         self.assertIn("Pitch [deg]", converted.columns)
