@@ -9,10 +9,7 @@ setup(
     author_email='lastname@gmail.com',
     license='MIT',
     python_requires='>=3.9',
-    packages=find_packages(
-        include=['pydatview', 'pydatview.*'],
-        exclude=['pydatview.plugins.tests', 'pydatview.plugins.tests.*'],
-    ),
+    packages=find_packages(include=['pydatview', 'pydatview.*']),
     data_files=[
         ('ressources', ['ressources/pyDatView.ico']),
         (
@@ -41,6 +38,7 @@ setup(
     extras_require={
         'build': ['pyinstaller>=6'],
         'rust-build': ['maturin>=1.4,<2'],
+        'test': ['pytest>=7'],
     },
     entry_points={
         'gui_scripts': [

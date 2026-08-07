@@ -182,27 +182,53 @@ binning resolution; frequency, cyclic-frequency, or period axes; and
 detrending. FFT plots enable the base-10 logarithmic Y axis by default and
 restore the previous Y-axis mode when returning to a regular plot.
 
+## Publication Export
+
+Use **File > Export publication plot** to render the current transformed plot
+with Matplotlib without changing the interactive PyQtGraph view. Available
+formats are vector PDF and SVG, LaTeX PGF, and PNG or TIFF up to 1200 DPI.
+The dialog controls physical figure dimensions, typography, line width,
+peak-preserving vector point limits, grid, legend, transparency, and editable
+X-axis and Y-axis labels.
+
+PGF and the optional **Use LaTeX text** setting require a LaTeX distribution
+on the exporting machine. PDF and SVG remain publication-quality vector
+options without LaTeX. For very large channels, the exporter retains local
+minima and maxima while reducing the number of vector path points.
+
 ## Tests
 
-Run the core and plugin tests:
+Run the full retained application and numerical test suite:
 
 ```bash
-python -m unittest discover -v tests
-python -m unittest discover -v pydatview/plugins/tests
+python -m pip install -e ".[test]"
+python -m pytest -q
 ```
 
 For a headless Linux or macOS session:
 
 ```bash
-QT_QPA_PLATFORM=offscreen python -m unittest discover -v tests
+QT_QPA_PLATFORM=offscreen python -m pytest -q
 ```
 
 For headless Windows PowerShell:
 
 ```powershell
 $env:QT_QPA_PLATFORM = "offscreen"
-python -m unittest discover -v tests
+python -m pytest -q
 ```
+
+## Code Layout
+
+- `qt_main.py` builds the main window, menus, and shared controls.
+- `qt_loading.py` owns scanning, lazy loading, and table indexing.
+- `qt_selection.py` owns column selection and plot-data construction.
+- `qt_tools.py` owns calculations, units, statistics, and exports.
+- `qt_plot.py` owns the PyQtGraph canvas and plot styling.
+- `qt_dialogs.py` owns standalone dialogs and table models.
+- `qt_io.py`, `qt_stats.py`, and `qt_math.py` contain reusable non-window helpers.
+- `Tables.py`, `plotdata.py`, `io/`, and `tools/` provide the shared data model,
+  readers, and numerical routines.
 
 ## Build a Windows Executable
 
@@ -218,6 +244,7 @@ python -m PyInstaller --noconfirm --clean --windowed --onedir `
   --icon ressources\pyDatView.ico `
   --add-data "ressources;ressources" `
   --collect-all pyqtgraph `
+  --collect-all matplotlib `
   pyDatView.py
 ```
 
@@ -249,5 +276,5 @@ python -m pydatview
 
 ## Adding File Formats
 
-Implement a subclass of `pydatview.io.File.File`, following the readers under
+Implement a subclass of `pydatview.io.file.File`, following the readers under
 `pydatview/io`, and register its `FileFormat` in `pydatview/io/__init__.py`.

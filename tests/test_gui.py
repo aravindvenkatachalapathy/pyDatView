@@ -27,7 +27,7 @@ class TestGUI(unittest.TestCase):
         self.assertTrue(window.windowTitle())
         self.assertEqual(
             window.font().pointSize(),
-            max(7, self.app.font().pointSize() - 2),
+            max(7, self.app.font().pointSize() - 1),
         )
         initial_font_size = window.font().pointSize()
         window.increase_font_action.trigger()

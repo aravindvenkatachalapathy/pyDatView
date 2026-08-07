@@ -265,7 +265,10 @@ def applySampler(x_old, y_old, sampDict, df_old=None):
         if pdVer[0]<=1 or (pdVer[0]<=2 and pdVer[1]<2):
             sSample = "{:f}S".format(sample_time)
 
-        time_index = pd.to_timedelta(x_old, unit="s")
+        # Keep nanosecond resolution so pandas can resample sub-second data
+        # even when the source values are whole seconds.
+        time_ns = np.rint(np.asarray(x_old, dtype=float) * 1e9).astype(np.int64)
+        time_index = pd.to_timedelta(time_ns, unit="ns")
         x_new = pd.Series(x_old, index=time_index).resample(sSample).mean().interpolate().values
 
         if df_old is not None:
