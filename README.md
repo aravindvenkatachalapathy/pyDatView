@@ -152,9 +152,25 @@ Enable **Keep files from previous scans** in the scan dialog to append new
 matches to the current index. Existing loaded data, cached variables, and the
 current file selection are retained; duplicate paths are ignored.
 
+## Plot Navigation
+
+Moving the pointer over a plot shows its X and Y coordinates in the status
+bar. Enable **Zoom area** and drag a rectangle over the required plot or
+subplot. Use **View > Auto range** to restore the complete data range.
+
+The Plot selector includes **Compare**, with Relative, absolute-relative,
+Ratio, Absolute, and Y-Y comparisons against the first selected series in
+each group. Comparison legends show `candidate file - reference file` so the
+direction is explicit. **Swap X-Y** exchanges the displayed axes after the
+selected plot transformation, including Compare, FFT, PDF, and MinMax.
+
 ## Statistics and FFT
 
-The **Stats** tab shows one row per plotted time series. Use the **DEL slopes**
+The **Stats** tab shows one row per plotted time series. Use its **Columns**
+menu to select channel, file, directory, table, sample count, median sample
+spacing (`dt`), median, mean, standard deviation, variance, `Std/Mean`, extrema,
+X locations of extrema, absolute maximum, X/Y ranges, and integral statistics.
+Selections are remembered between sessions. Use the separate **DEL slopes**
 menu to add one or more 1 Hz damage-equivalent-load columns for Wohler slopes
 from 2 through 13.
 

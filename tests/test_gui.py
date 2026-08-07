@@ -25,6 +25,10 @@ class TestGUI(unittest.TestCase):
         self.assertIs(MainFrame, MainWindow)
         window = MainWindow()
         self.assertTrue(window.windowTitle())
+        self.assertEqual(
+            window.font().pointSize(),
+            max(7, self.app.font().pointSize() - 2),
+        )
         window.close()
         self.app.processEvents()
 
@@ -60,6 +64,165 @@ class TestGUI(unittest.TestCase):
         np.testing.assert_allclose(converted["Pitch [deg]"], [0.0, 90.0])
         np.testing.assert_allclose(converted["Power [kW]"], [1000.0, 2000.0])
         np.testing.assert_allclose(converted["Speed [rpm]"], [0.0, 1.0])
+
+        window.close()
+        self.app.processEvents()
+
+    def test_plot_hover_coordinates_and_area_zoom(self):
+        from pydatview.qt_main import MainWindow, QtCore, pg
+
+        window = MainWindow()
+        window.resize(1000, 700)
+        plot_data = SimpleNamespace(
+            x=np.array([0.0, 2.0, 4.0]),
+            y=np.array([0.0, 4.0, 8.0]),
+            sx="Time [s]",
+            sy="Load [N]",
+            syl="Load [N]",
+            st="case.out",
+            filename="case.out",
+            it=0,
+            pane_index=0,
+        )
+        window.canvas.plot_data([plot_data])
+        window.canvas.useOpenGL(False)
+        window.show()
+        self.app.processEvents()
+
+        self.assertEqual(window.canvas.cursor().shape(), QtCore.Qt.CrossCursor)
+        view_box = window.canvas._plots[0].getViewBox()
+        scene_position = view_box.mapViewToScene(QtCore.QPointF(2.0, 4.0))
+        window.canvas._on_mouse_moved((scene_position,))
+        self.assertIn("X: 2", window.coordinate_label.text())
+        self.assertIn("Y: 4", window.coordinate_label.text())
+
+        window.zoom_area_button.setChecked(True)
+        self.assertTrue(window.zoom_area_action.isChecked())
+        self.assertEqual(view_box.state["mouseMode"], pg.ViewBox.RectMode)
+        window.zoom_area_button.setChecked(False)
+        self.assertEqual(view_box.state["mouseMode"], pg.ViewBox.PanMode)
+        self.assertEqual(window.canvas._display_axis_value(2.0, True), 100.0)
+
+        window.close()
+        self.app.processEvents()
+
+    def test_compare_plot_mode_and_swap_xy(self):
+        from pydatview.Tables import Table
+        from pydatview.plotdata import PlotData
+        from pydatview.qt_main import (
+            MainWindow,
+            _COMPARISON_METHODS,
+            compare_plot_data,
+            swap_plot_axes,
+        )
+
+        window = MainWindow()
+        plot_modes = [
+            window.plot_type_combo.itemText(index)
+            for index in range(window.plot_type_combo.count())
+        ]
+        self.assertIn("Compare", plot_modes)
+        methods = [
+            window.comparison_method_combo.itemText(index)
+            for index in range(window.comparison_method_combo.count())
+        ]
+        self.assertEqual(methods, list(_COMPARISON_METHODS))
+        window.plot_type_combo.setCurrentText("Compare")
+        window.redraw_timer.stop()
+        self.assertFalse(window.comparison_options_panel.isHidden())
+
+        reference = PlotData(
+            x=np.array([0.0, 1.0, 2.0]),
+            y=np.array([1.0, 2.0, 4.0]),
+            sx="Time [s]",
+            sy="Load [N]",
+        )
+        reference.st = "reference.out"
+        reference.filename = "reference.out"
+        reference.it = 0
+        reference.pane_index = 0
+        reference.selection_index = 0
+        candidate = PlotData(
+            x=np.array([0.0, 1.0, 2.0]),
+            y=np.array([2.0, 4.0, 8.0]),
+            sx="Time [s]",
+            sy="Load [N]",
+        )
+        candidate.st = "candidate.out"
+        candidate.filename = "candidate.out"
+        candidate.it = 1
+        candidate.pane_index = 1
+        candidate.selection_index = 0
+
+        compared = compare_plot_data([reference, candidate], "Relative")
+        self.assertEqual(len(compared), 1)
+        np.testing.assert_allclose(compared[0].x, [0.0, 1.0, 2.0])
+        np.testing.assert_allclose(compared[0].y, [100.0, 100.0, 100.0])
+        self.assertEqual(compared[0].sy, "Relative error [%]")
+        self.assertEqual(
+            compared[0].syl,
+            "candidate.out - reference.out | Load",
+        )
+
+        swap_plot_axes(compared[0])
+        np.testing.assert_allclose(compared[0].x, [100.0, 100.0, 100.0])
+        np.testing.assert_allclose(compared[0].y, [0.0, 1.0, 2.0])
+        self.assertEqual(compared[0].sx, "Relative error [%]")
+        self.assertEqual(compared[0].sy, "Time [s]")
+        window.swap_xy_check.setChecked(True)
+        window.redraw_timer.stop()
+        self.assertTrue(window.swap_xy_check.isChecked())
+
+        window.swap_xy_check.setChecked(False)
+        window.comparison_method_combo.setCurrentText("Absolute")
+        window.redraw_timer.stop()
+        window.tab_list.append([
+            Table(
+                data=pd.DataFrame({
+                    "Time [s]": [0.0, 1.0, 2.0],
+                    "Load [N]": [1.0, 2.0, 4.0],
+                }),
+                name="reference",
+                filename="reference.out",
+            ),
+            Table(
+                data=pd.DataFrame({
+                    "Time [s]": [0.0, 1.0, 2.0],
+                    "Load [N]": [2.0, 4.0, 8.0],
+                }),
+                name="candidate",
+                filename="candidate.out",
+            ),
+        ])
+        window.populate_tables()
+        pane = window.selector_panes[0]
+        pane.table_list_widget.blockSignals(True)
+        for row in range(pane.table_list_widget.count()):
+            pane.table_list_widget.item(row).setSelected(True)
+        pane.table_list_widget.blockSignals(False)
+        window.on_table_selection_changed(pane)
+        window.redraw_timer.stop()
+        pane.x_combo.setCurrentText("Time [s]")
+        pane.y_list_widget.clearSelection()
+        for row in range(pane.y_list_widget.count()):
+            item = pane.y_list_widget.item(row)
+            if item.text() == "Load [N]":
+                item.setSelected(True)
+        window.redraw_timer.stop()
+
+        integrated = window.build_plot_data()
+        self.assertEqual(len(integrated), 1)
+        np.testing.assert_allclose(integrated[0].x, [0.0, 1.0, 2.0])
+        np.testing.assert_allclose(integrated[0].y, [1.0, 2.0, 4.0])
+        self.assertEqual(integrated[0].sy, "Absolute error [N]")
+
+        window.swap_xy_check.setChecked(True)
+        window.redraw_timer.stop()
+        swapped = window.build_plot_data()
+        np.testing.assert_allclose(swapped[0].x, [1.0, 2.0, 4.0])
+        np.testing.assert_allclose(swapped[0].y, [0.0, 1.0, 2.0])
+        self.assertEqual(swapped[0].sx, "Absolute error [N]")
+        self.assertEqual(swapped[0].sy, "Time [s]")
 
         window.close()
         self.app.processEvents()
@@ -395,8 +558,16 @@ class TestGUI(unittest.TestCase):
             action.blockSignals(True)
             action.setChecked(slope in (2, 4))
             action.blockSignals(False)
+        for key, action in window.stats_column_actions.items():
+            action.blockSignals(True)
+            action.setChecked(key in {
+                "series", "file", "n", "dt", "mean", "std", "min", "max",
+            })
+            action.blockSignals(False)
+        window.update_stats_columns_button()
         window.update_del_slopes_button()
         window.plot_data = window.build_plot_data()
+        window.plot_data[0].syl = "fatigue.out - Load [N]"
         window.update_stats()
 
         headers = [
@@ -404,6 +575,18 @@ class TestGUI(unittest.TestCase):
             for column in range(window.stats_table.columnCount())
         ]
         self.assertEqual(window.stats_table.rowCount(), 1)
+        self.assertEqual(
+            window.stats_table.item(0, headers.index("Series")).text(),
+            "Load [N]",
+        )
+        self.assertEqual(
+            window.stats_table.item(0, headers.index("Filename")).text(),
+            "fatigue.out",
+        )
+        self.assertAlmostEqual(
+            float(window.stats_table.item(0, headers.index("dt")).text()),
+            0.05,
+        )
         self.assertIn("DEL m=2 (1 Hz)", headers)
         self.assertIn("DEL m=4 (1 Hz)", headers)
         for slope in (2, 4):
@@ -422,6 +605,88 @@ class TestGUI(unittest.TestCase):
                 method="rainflow_windap",
             )
             self.assertAlmostEqual(actual, expected, places=4)
+        window.close()
+        self.app.processEvents()
+
+    def test_stats_columns_are_selectable_and_match_legacy_calculations(self):
+        from pydatview.Tables import Table
+        from pydatview.qt_main import MainWindow
+
+        window = MainWindow()
+        x = np.array([0.0, 1.0, 2.0, 4.0])
+        y = np.array([2.0, 4.0, 1.0, 5.0])
+        window.tab_list.append(Table(
+            data=pd.DataFrame({"Time [s]": x, "Load [N]": y}),
+            name="statistics",
+            filename="stats.out",
+        ))
+        window.populate_tables()
+        pane = window.selector_panes[0]
+        pane.y_list_widget.clearSelection()
+        for row in range(pane.y_list_widget.count()):
+            item = pane.y_list_widget.item(row)
+            if item.text() == "Load [N]":
+                item.setSelected(True)
+
+        selected = {
+            "series", "file", "directory", "table", "n", "dt", "median",
+            "mean", "std", "var", "std_mean", "min", "max", "x_at_min",
+            "x_at_max", "abs_max", "range", "x_min", "x_max", "x_range",
+            "integral", "integral_mean", "integral_x",
+            "integral_centroid", "integral_x2",
+        }
+        for key, action in window.stats_column_actions.items():
+            action.blockSignals(True)
+            action.setChecked(key in selected)
+            action.blockSignals(False)
+        for action in window.del_slope_actions.values():
+            action.blockSignals(True)
+            action.setChecked(False)
+            action.blockSignals(False)
+        window.update_stats_columns_button()
+        window.update_del_slopes_button()
+        window.plot_data = window.build_plot_data()
+        window.plot_data[0].syl = "stats.out - Load [N]"
+        window.update_stats()
+
+        headers = [
+            window.stats_table.horizontalHeaderItem(column).text()
+            for column in range(window.stats_table.columnCount())
+        ]
+        values = {
+            header: window.stats_table.item(0, column).text()
+            for column, header in enumerate(headers)
+        }
+        self.assertEqual(values["Series"], "Load [N]")
+        self.assertEqual(values["Filename"], "stats.out")
+        self.assertEqual(values["n"], "4")
+        expected = {
+            "dt": 1.0,
+            "Median": 3.0,
+            "Mean": 3.0,
+            "Std": np.sqrt(2.5),
+            "Var": 2.5,
+            "Std/Mean (TI)": np.sqrt(2.5) / 3.0,
+            "Min": 1.0,
+            "Max": 5.0,
+            "x@Min": 2.0,
+            "x@Max": 4.0,
+            "Abs. Max": 5.0,
+            "Range": 4.0,
+            "xMin": 0.0,
+            "xMax": 4.0,
+            "xRange": 4.0,
+            "Integral y dx": 11.5,
+            "Integral y dx / Integral dx": 2.875,
+            "Integral y*x dx": 27.0,
+            "Integral y*x dx / Integral y dx": 27.0 / 11.5,
+            "Integral y*x^2 dx": 90.0,
+        }
+        for header, expected_value in expected.items():
+            self.assertAlmostEqual(
+                float(values[header]), expected_value, places=5, msg=header
+            )
+
         window.close()
         self.app.processEvents()
 

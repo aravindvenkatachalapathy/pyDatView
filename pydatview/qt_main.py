@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from pydatview.Tables import TableList
-from pydatview.common import no_unit
+from pydatview.common import no_unit, unit
 from pydatview.plotdata import PlotData, PDL_xlabel
 import pydatview.io as weio
 
@@ -394,6 +394,276 @@ def _finite_xy(x, y):
     if finite.all():
         return x, y
     return x[finite], y[finite]
+
+
+def _sample_spacing(x):
+    x = _as_float_array(x)
+    if len(x) < 2:
+        return np.nan
+    spacing = np.abs(np.diff(x))
+    spacing = spacing[np.isfinite(spacing) & (spacing > 0)]
+    return float(np.median(spacing)) if len(spacing) else np.nan
+
+
+def _trapezoidal_integral(y, x):
+    trapezoid = getattr(np, "trapezoid", None)
+    if trapezoid is not None:
+        return trapezoid(y, x)
+    return np.trapz(y, x)
+
+
+_STATS_COLUMNS = (
+    ("series", "Series", False),
+    ("file", "Filename", False),
+    ("directory", "Directory", False),
+    ("table", "Table", False),
+    ("n", "n", True),
+    ("dt", "dt", True),
+    ("median", "Median", True),
+    ("mean", "Mean", True),
+    ("std", "Std", True),
+    ("var", "Var", True),
+    ("std_mean", "Std/Mean (TI)", True),
+    ("min", "Min", True),
+    ("max", "Max", True),
+    ("x_at_min", "x@Min", True),
+    ("x_at_max", "x@Max", True),
+    ("abs_max", "Abs. Max", True),
+    ("range", "Range", True),
+    ("x_min", "xMin", True),
+    ("x_max", "xMax", True),
+    ("x_range", "xRange", True),
+    ("integral", "Integral y dx", True),
+    ("integral_mean", "Integral y dx / Integral dx", True),
+    ("integral_x", "Integral y*x dx", True),
+    ("integral_centroid", "Integral y*x dx / Integral y dx", True),
+    ("integral_x2", "Integral y*x^2 dx", True),
+)
+_DEFAULT_STATS_COLUMNS = (
+    "series", "file", "n", "dt", "mean", "std", "min", "max", "range"
+)
+
+
+def _series_statistics(pd, x, y, selected):
+    selected = set(selected)
+    filename = getattr(pd, "filename", "") or getattr(pd, "st", "")
+    values = {
+        "series": getattr(pd, "sy", ""),
+        "file": os.path.basename(filename),
+        "directory": os.path.dirname(filename),
+        "table": getattr(pd, "tabname", ""),
+        "n": len(y),
+    }
+    if "dt" in selected:
+        values["dt"] = _sample_spacing(x)
+    if len(y) == 0:
+        return values
+
+    need_extrema = bool(selected & {
+        "min", "max", "x_at_min", "x_at_max", "abs_max", "range"
+    })
+    if need_extrema:
+        minimum_index = int(np.argmin(y))
+        maximum_index = int(np.argmax(y))
+        minimum = float(y[minimum_index])
+        maximum = float(y[maximum_index])
+        values.update({
+            "min": minimum,
+            "max": maximum,
+            "x_at_min": float(x[minimum_index]),
+            "x_at_max": float(x[maximum_index]),
+            "abs_max": max(abs(minimum), abs(maximum)),
+            "range": maximum - minimum,
+        })
+
+    need_mean = bool(selected & {"mean", "std_mean"})
+    mean = float(np.mean(y)) if need_mean else np.nan
+    if need_mean:
+        values["mean"] = mean
+    need_std = bool(selected & {"std", "var", "std_mean"})
+    std = float(np.std(y)) if need_std else np.nan
+    if need_std:
+        values["std"] = std
+        values["var"] = std ** 2
+    if "median" in selected:
+        values["median"] = float(np.median(y))
+    if "std_mean" in selected:
+        values["std_mean"] = std / mean if mean != 0 else np.nan
+
+    need_x_range = bool(selected & {
+        "x_min", "x_max", "x_range", "integral_mean"
+    })
+    if need_x_range:
+        x_minimum = float(np.min(x))
+        x_maximum = float(np.max(x))
+        x_range = x_maximum - x_minimum
+        values.update({
+            "x_min": x_minimum,
+            "x_max": x_maximum,
+            "x_range": x_range,
+        })
+
+    integral_keys = {
+        "integral", "integral_mean", "integral_x",
+        "integral_centroid", "integral_x2",
+    }
+    if len(x) > 1 and selected & integral_keys:
+        integral = float(_trapezoidal_integral(y, x))
+        values["integral"] = integral
+        if "integral_mean" in selected:
+            values["integral_mean"] = (
+                integral / x_range if x_range != 0 else np.nan
+            )
+        if selected & {"integral_x", "integral_centroid"}:
+            integral_x = float(_trapezoidal_integral(y * x, x))
+            values["integral_x"] = integral_x
+            values["integral_centroid"] = (
+                integral_x / integral if integral != 0 else np.nan
+            )
+        if "integral_x2" in selected:
+            values["integral_x2"] = float(
+                _trapezoidal_integral(y * x ** 2, x)
+            )
+    return values
+
+
+_COMPARISON_METHODS = ("Relative", "|Relative|", "Ratio", "Absolute", "Y-Y")
+
+
+def _comparison_error(y, reference, method):
+    with np.errstate(divide="ignore", invalid="ignore"):
+        if method in ("Relative", "|Relative|"):
+            denominator = (
+                reference + 1.0
+                if np.mean(np.abs(reference)) < 1e-7
+                else reference
+            )
+            result = (y - reference) / denominator * 100.0
+            return np.abs(result) if method == "|Relative|" else result
+        if method == "Ratio":
+            if np.mean(np.abs(reference)) < 1e-7:
+                return (y + 1.0) / (reference + 1.0)
+            return y / reference
+        if method == "Absolute":
+            return y - reference
+    raise ValueError("Unsupported comparison method: {}".format(method))
+
+
+def _comparison_axis_label(method, reference_pd, candidate_pd):
+    if method == "Relative":
+        return "Relative error [%]"
+    if method == "|Relative|":
+        return "Abs. relative error [%]"
+    if method == "Ratio":
+        return "Ratio [-]"
+    if method == "Absolute":
+        units = {unit(reference_pd.sy), unit(candidate_pd.sy)} - {""}
+        return (
+            "Absolute error [{}]".format(next(iter(units)))
+            if len(units) == 1 else "Absolute error"
+        )
+    raise ValueError("Y-Y uses the candidate channel as its Y-axis label")
+
+
+def _comparison_source(pd):
+    filename = getattr(pd, "filename", "")
+    source = os.path.abspath(filename) if filename else getattr(pd, "it", -1)
+    return getattr(pd, "pane_index", 0), source
+
+
+def compare_plot_data(plot_data, method):
+    if method not in _COMPARISON_METHODS:
+        raise ValueError("Unsupported comparison method: {}".format(method))
+    if len(plot_data) < 2:
+        raise ValueError("Compare requires at least two selected time series")
+
+    source_count = len({_comparison_source(pd) for pd in plot_data})
+    if source_count == 1:
+        groups = [plot_data]
+    else:
+        grouped = {}
+        for pd in plot_data:
+            key = getattr(pd, "selection_index", getattr(pd, "iy", 0))
+            grouped.setdefault(key, []).append(pd)
+        groups = list(grouped.values())
+
+    compared = []
+    for group in groups:
+        if len(group) < 2:
+            continue
+        reference_pd = group[0]
+        if reference_pd.xIsString or reference_pd.yIsString:
+            raise ValueError("String channels cannot be compared")
+        if reference_pd.xIsDate or reference_pd.yIsDate:
+            raise ValueError("Date channels cannot be compared")
+        reference_x, reference_y = _finite_xy(reference_pd.x, reference_pd.y)
+        if len(reference_x) < 2:
+            raise ValueError("The comparison reference needs at least two samples")
+
+        reference_name = "{} - {}".format(
+            reference_pd.st, no_unit(reference_pd.sy)
+        )
+        reference_channel = no_unit(reference_pd.sy)
+        for candidate_pd in group[1:]:
+            if candidate_pd.xIsString or candidate_pd.yIsString:
+                raise ValueError("String channels cannot be compared")
+            if candidate_pd.xIsDate or candidate_pd.yIsDate:
+                raise ValueError("Date channels cannot be compared")
+            candidate_x, candidate_y = _finite_xy(candidate_pd.x, candidate_pd.y)
+            if len(candidate_x) < 2:
+                continue
+            order = np.argsort(candidate_x)
+            candidate_y = np.interp(
+                reference_x,
+                candidate_x[order],
+                candidate_y[order],
+            )
+            candidate_name = "{} - {}".format(
+                candidate_pd.st, no_unit(candidate_pd.sy)
+            )
+            candidate_channel = no_unit(candidate_pd.sy)
+            channel_pair = (
+                candidate_channel
+                if candidate_channel == reference_channel
+                else "{} - {}".format(candidate_channel, reference_channel)
+            )
+            candidate_pd.syl = "{} - {} | {}".format(
+                candidate_pd.st, reference_pd.st, channel_pair
+            )
+            if method == "Y-Y":
+                candidate_pd.x = reference_y
+                candidate_pd.y = candidate_y
+                candidate_pd.sx = reference_name
+                candidate_pd.sy = candidate_name
+            else:
+                candidate_pd.x = reference_x
+                candidate_pd.y = _comparison_error(
+                    candidate_y, reference_y, method
+                )
+                candidate_pd.sx = reference_pd.sx
+                candidate_pd.sy = _comparison_axis_label(
+                    method, reference_pd, candidate_pd
+                )
+            candidate_pd.xIsString = False
+            candidate_pd.yIsString = False
+            candidate_pd.xIsDate = False
+            candidate_pd.yIsDate = False
+            candidate_pd.c = candidate_pd.y
+            candidate_pd._post_init()
+            compared.append(candidate_pd)
+
+    if not compared:
+        raise ValueError(
+            "Compare needs at least two matching series in a comparison group"
+        )
+    return compared
+
+
+def swap_plot_axes(pd):
+    pd.x, pd.y = pd.y, pd.x
+    pd.sx, pd.sy = pd.sy, pd.sx
+    pd.xIsString, pd.yIsString = pd.yIsString, pd.xIsString
+    pd.xIsDate, pd.yIsDate = pd.yIsDate, pd.xIsDate
 
 
 def _equivalent_loads(time_values, signal_values, slopes):
@@ -1061,20 +1331,70 @@ class ScanDialog(QtWidgets.QDialog):
 
 class QtPlotCanvas(pg.GraphicsLayoutWidget):
     curveSelected = QtCore.Signal(object)
+    hoverCoordinates = QtCore.Signal(object)
 
     def __init__(self, parent=None):
         super().__init__(parent=parent)
         pg.setConfigOptions(useOpenGL=True, antialias=False, background="w", foreground="k")
         self.setBackground("w")
+        self.setCursor(QtGui.QCursor(QtCore.Qt.CrossCursor))
+        self.setMouseTracking(True)
+        self.viewport().setCursor(QtGui.QCursor(QtCore.Qt.CrossCursor))
+        self.viewport().setMouseTracking(True)
         self._plots = []
         self._curve_items = []
         self._selected_curve = None
+        self._zoom_mode = False
+        self._logx = False
+        self._logy = False
+        self._mouse_proxy = pg.SignalProxy(
+            self.scene().sigMouseMoved,
+            rateLimit=60,
+            slot=self._on_mouse_moved,
+        )
 
     def clear_plot(self):
         self.clear()
         self._plots = []
         self._curve_items = []
         self._selected_curve = None
+        self.hoverCoordinates.emit(None)
+
+    def set_zoom_mode(self, enabled):
+        self._zoom_mode = bool(enabled)
+        mouse_mode = pg.ViewBox.RectMode if enabled else pg.ViewBox.PanMode
+        for plot in self._plots:
+            plot.getViewBox().setMouseMode(mouse_mode)
+
+    @staticmethod
+    def _display_axis_value(value, logarithmic):
+        value = float(value)
+        if not logarithmic:
+            return value
+        with np.errstate(over="ignore", invalid="ignore"):
+            return float(np.power(10.0, value))
+
+    def coordinates_at(self, scene_position):
+        for plot_index, plot in enumerate(self._plots):
+            view_box = plot.getViewBox()
+            if not view_box.sceneBoundingRect().contains(scene_position):
+                continue
+            point = view_box.mapSceneToView(scene_position)
+            return {
+                "plot_index": plot_index,
+                "plot_count": len(self._plots),
+                "x": self._display_axis_value(point.x(), self._logx),
+                "y": self._display_axis_value(point.y(), self._logy),
+            }
+        return None
+
+    def _on_mouse_moved(self, event):
+        scene_position = event[0] if isinstance(event, (tuple, list)) else event
+        self.hoverCoordinates.emit(self.coordinates_at(scene_position))
+
+    def leaveEvent(self, event):
+        self.hoverCoordinates.emit(None)
+        super().leaveEvent(event)
 
     def plot_data(self, plot_data, *, subplots=False, sharex=True, grid=True,
                   logx=False, logy=False, show_legend=True, line_width=1.25,
@@ -1083,6 +1403,8 @@ class QtPlotCanvas(pg.GraphicsLayoutWidget):
         # discard points. Keep accelerated rendering for regular plots.
         self.useOpenGL(not (logx or logy))
         self.clear_plot()
+        self._logx = bool(logx)
+        self._logy = bool(logy)
         if len(plot_data) == 0:
             return
 
@@ -1106,6 +1428,9 @@ class QtPlotCanvas(pg.GraphicsLayoutWidget):
             self._plots.append(plot)
 
             self._style_plot(plot)
+            plot.getViewBox().setMouseMode(
+                pg.ViewBox.RectMode if self._zoom_mode else pg.ViewBox.PanMode
+            )
             plot.showGrid(x=grid, y=grid, alpha=0.25)
             ylabel = " and ".join(sorted(set(pd.sy for pd in group)))
             if len(ylabel) < 120:
@@ -1255,6 +1580,9 @@ class MainWindow(QtWidgets.QMainWindow):
     def __init__(self, filenames=None, dataframes=None, names=None):
         super().__init__()
         self.setWindowTitle("pyDatView Qt")
+        ui_font = QtGui.QFont(self.font())
+        ui_font.setPointSize(max(7, ui_font.pointSize() - 2))
+        self.setFont(ui_font)
         self.resize(1280, 820)
         self.settings = QtCore.QSettings("NREL", "pyDatView")
         self.tab_list = TableList()
@@ -1320,13 +1648,15 @@ class MainWindow(QtWidgets.QMainWindow):
         top.setVerticalSpacing(7)
         root.addWidget(controls_panel)
         self.plot_type_combo = QtWidgets.QComboBox()
-        self.plot_type_combo.addItems(["Regular", "PDF", "FFT", "MinMax"])
+        self.plot_type_combo.addItems(["Regular", "FFT", "PDF", "MinMax", "Compare"])
         self.mode_combo = QtWidgets.QComboBox()
         self.mode_combo.addItems(["Overlay", "Subplots"])
         self.compare_combo = QtWidgets.QComboBox()
         self.compare_combo.addItems(["Auto", "2", "3"])
         self.live_plot = QtWidgets.QCheckBox("Live plot")
         self.live_plot.setChecked(True)
+        self.swap_xy_check = QtWidgets.QCheckBox("Swap X-Y")
+        self.swap_xy_check.setChecked(False)
         self.grid_check = QtWidgets.QCheckBox("Grid")
         self.grid_check.setChecked(False)
         self.logx_check = QtWidgets.QCheckBox("Log x")
@@ -1341,6 +1671,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self.marker_combo.addItems(["None", "Circle", "Square", "Triangle", "Diamond"])
         self.axis_limits_button = QtWidgets.QPushButton("Limits")
         self.axis_limits_button.setToolTip("Set X and Y plot limits")
+        self.zoom_area_button = QtWidgets.QPushButton("Zoom area")
+        self.zoom_area_button.setObjectName("zoomAreaButton")
+        self.zoom_area_button.setCheckable(True)
+        self.zoom_area_button.setFixedWidth(105)
+        self.zoom_area_button.setToolTip(
+            "Drag a rectangle over a plot; use Auto range to restore the full view"
+        )
         self.load_workers_combo = QtWidgets.QComboBox()
         self.load_workers_combo.addItems(["Auto", "1", "2", "4", "8", "16", "32", "64", "96"])
         self.load_workers_combo.setToolTip(
@@ -1365,6 +1702,7 @@ class MainWindow(QtWidgets.QMainWindow):
         top.addWidget(QtWidgets.QLabel("Compare"), 0, 4)
         top.addWidget(self.compare_combo, 0, 5)
         top.addWidget(self.live_plot, 0, 6)
+        top.addWidget(self.swap_xy_check, 0, 7)
         top.setColumnStretch(9, 1)
         top.addWidget(self.status_label, 0, 10, QtCore.Qt.AlignRight)
 
@@ -1377,6 +1715,7 @@ class MainWindow(QtWidgets.QMainWindow):
         top.addWidget(QtWidgets.QLabel("Marker"), 1, 6)
         top.addWidget(self.marker_combo, 1, 7)
         top.addWidget(self.axis_limits_button, 1, 8)
+        top.addWidget(self.zoom_area_button, 1, 9, QtCore.Qt.AlignLeft)
         load_controls = QtWidgets.QHBoxLayout()
         load_controls.setContentsMargins(0, 0, 0, 0)
         load_controls.setSpacing(6)
@@ -1453,6 +1792,27 @@ class MainWindow(QtWidgets.QMainWindow):
         self.fft_options_panel.setVisible(False)
         root.addWidget(self.fft_options_panel)
 
+        self.comparison_options_panel = QtWidgets.QFrame()
+        self.comparison_options_panel.setObjectName("plotControls")
+        comparison_layout = QtWidgets.QHBoxLayout(self.comparison_options_panel)
+        comparison_layout.setContentsMargins(10, 6, 10, 6)
+        comparison_layout.setSpacing(8)
+        comparison_layout.addWidget(QtWidgets.QLabel("Comparison type"))
+        self.comparison_method_combo = QtWidgets.QComboBox()
+        self.comparison_method_combo.addItems(list(_COMPARISON_METHODS))
+        saved_comparison_method = str(
+            self.settings.value("compare/method", "Relative")
+        )
+        if saved_comparison_method in _COMPARISON_METHODS:
+            self.comparison_method_combo.setCurrentText(saved_comparison_method)
+        self.comparison_method_combo.setToolTip(
+            "The first selected series in each group is the reference"
+        )
+        comparison_layout.addWidget(self.comparison_method_combo)
+        comparison_layout.addStretch(1)
+        self.comparison_options_panel.setVisible(False)
+        root.addWidget(self.comparison_options_panel)
+
         self.main_splitter = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
         self.main_splitter.setChildrenCollapsible(False)
         root.addWidget(self.main_splitter, 1)
@@ -1505,6 +1865,39 @@ class MainWindow(QtWidgets.QMainWindow):
         stats_layout.setContentsMargins(6, 6, 6, 6)
         stats_layout.setSpacing(5)
         stats_controls = QtWidgets.QHBoxLayout()
+        stats_controls.addWidget(QtWidgets.QLabel("Columns"))
+        self.stats_columns_button = QtWidgets.QToolButton()
+        self.stats_columns_button.setPopupMode(QtWidgets.QToolButton.InstantPopup)
+        self.stats_columns_menu = QtWidgets.QMenu(self.stats_columns_button)
+        self.stats_column_actions = {}
+        valid_stats_columns = {key for key, _label, _numeric in _STATS_COLUMNS}
+        saved_stats_columns = self.settings.value(
+            "stats/columns", list(_DEFAULT_STATS_COLUMNS)
+        )
+        if isinstance(saved_stats_columns, str):
+            saved_stats_columns = [saved_stats_columns]
+        elif not isinstance(saved_stats_columns, (list, tuple, set)):
+            saved_stats_columns = [saved_stats_columns]
+        selected_stats_columns = {
+            str(key) for key in saved_stats_columns
+            if str(key) in valid_stats_columns
+        }
+        if not selected_stats_columns:
+            selected_stats_columns = set(_DEFAULT_STATS_COLUMNS)
+        for key, label, _numeric in _STATS_COLUMNS:
+            action = self.stats_columns_menu.addAction(label)
+            action.setCheckable(True)
+            action.setChecked(key in selected_stats_columns)
+            action.toggled.connect(self.on_stats_columns_changed)
+            self.stats_column_actions[key] = action
+        self.stats_columns_menu.addSeparator()
+        select_all_stats_action = self.stats_columns_menu.addAction("Select all")
+        select_all_stats_action.triggered.connect(self.select_all_stats_columns)
+        reset_stats_action = self.stats_columns_menu.addAction("Restore defaults")
+        reset_stats_action.triggered.connect(self.reset_stats_columns)
+        self.stats_columns_button.setMenu(self.stats_columns_menu)
+        stats_controls.addWidget(self.stats_columns_button)
+        stats_controls.addSpacing(12)
         stats_controls.addWidget(QtWidgets.QLabel("DEL slopes"))
         self.del_slopes_button = QtWidgets.QToolButton()
         self.del_slopes_button.setPopupMode(QtWidgets.QToolButton.InstantPopup)
@@ -1534,6 +1927,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.stats_table.setSelectionMode(QtWidgets.QAbstractItemView.SingleSelection)
         self.stats_table.verticalHeader().setVisible(False)
         stats_layout.addWidget(self.stats_table, 1)
+        self.update_stats_columns_button()
         self.update_del_slopes_button()
         self.detail_tabs.addTab(self.table_view, "Data")
         self.detail_tabs.addTab(self.stats_panel, "Stats")
@@ -1553,6 +1947,16 @@ class MainWindow(QtWidgets.QMainWindow):
         self.main_splitter.setSizes([340, 940])
 
         self.setStatusBar(QtWidgets.QStatusBar())
+        self.coordinate_label = QtWidgets.QLabel("X: --   Y: --")
+        self.coordinate_label.setObjectName("coordinateReadout")
+        self.coordinate_label.setAlignment(
+            QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter
+        )
+        self.coordinate_label.setFixedWidth(300)
+        self.coordinate_label.setFont(
+            QtGui.QFontDatabase.systemFont(QtGui.QFontDatabase.FixedFont)
+        )
+        self.statusBar().addPermanentWidget(self.coordinate_label)
         self._apply_light_borders()
 
     def create_selector_pane(self, index):
@@ -1686,6 +2090,12 @@ class MainWindow(QtWidgets.QMainWindow):
                 border: 1px solid #9bbcf1;
                 border-radius: 4px;
                 padding: 4px 8px;
+            }
+            QLabel#coordinateReadout {
+                color: #17212b;
+                background: #eef2f6;
+                border-left: 1px solid #8794a2;
+                padding: 2px 8px;
             }
             QMenuBar {
                 background: #d6dee7;
@@ -1823,6 +2233,12 @@ class MainWindow(QtWidgets.QMainWindow):
             QPushButton#primaryButton:hover {
                 background: #0f5dad;
             }
+            QPushButton#zoomAreaButton:checked {
+                color: #ffffff;
+                background: #1769c2;
+                border-color: #0e559f;
+                font-weight: 600;
+            }
             QPushButton[limitsActive="true"] {
                 color: #174ea6;
                 background: #dbeafe;
@@ -1944,6 +2360,9 @@ class MainWindow(QtWidgets.QMainWindow):
         view_menu = self.menuBar().addMenu("&View")
         self.autorange_action = view_menu.addAction("Auto range")
         self.autorange_action.triggered.connect(self.auto_range)
+        self.zoom_area_action = view_menu.addAction("Zoom area")
+        self.zoom_area_action.setCheckable(True)
+        self.zoom_area_action.toggled.connect(self.on_zoom_area_toggled)
         self.axis_limits_action = view_menu.addAction("Axis limits")
         self.axis_limits_action.triggered.connect(self.open_axis_limits_dialog)
         view_export_plot_action = view_menu.addAction("Export plot")
@@ -1965,6 +2384,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.plot_type_combo.currentIndexChanged.connect(self.on_plot_type_changed)
         self.mode_combo.currentIndexChanged.connect(self.on_selection_changed)
         self.compare_combo.currentIndexChanged.connect(self.on_compare_mode_changed)
+        self.swap_xy_check.stateChanged.connect(self.on_swap_xy_changed)
         self.grid_check.stateChanged.connect(self.on_selection_changed)
         self.logx_check.stateChanged.connect(self.on_selection_changed)
         self.logy_check.stateChanged.connect(self.on_selection_changed)
@@ -1972,8 +2392,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self.line_width_spin.valueChanged.connect(self.on_selection_changed)
         self.marker_combo.currentIndexChanged.connect(self.on_selection_changed)
         self.axis_limits_button.clicked.connect(self.open_axis_limits_dialog)
+        self.zoom_area_button.toggled.connect(self.zoom_area_action.setChecked)
+        self.comparison_method_combo.currentIndexChanged.connect(
+            self.on_comparison_options_changed
+        )
         self.load_workers_combo.currentIndexChanged.connect(self.update_lazy_worker_limit)
         self.canvas.curveSelected.connect(self.on_curve_selected)
+        self.canvas.hoverCoordinates.connect(self.on_plot_hover)
         self.plot_button.clicked.connect(self.redraw)
         self.clear_button.clicked.connect(self.clear)
         self.select_all_y_button.clicked.connect(self.select_all_y)
@@ -2005,7 +2430,17 @@ class MainWindow(QtWidgets.QMainWindow):
             self.logy_check.blockSignals(False)
         self._previous_plot_type = plot_type
         self.fft_options_panel.setVisible(is_fft)
+        self.comparison_options_panel.setVisible(plot_type == "Compare")
         self.update_fft_control_states()
+        self.on_selection_changed()
+
+    def on_comparison_options_changed(self, _value=None):
+        self.settings.setValue(
+            "compare/method", self.comparison_method_combo.currentText()
+        )
+        self.on_selection_changed()
+
+    def on_swap_xy_changed(self, _value=None):
         self.on_selection_changed()
 
     def update_fft_control_states(self):
@@ -2061,6 +2496,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.reload_action,
             self.scan_action,
             self.autorange_action,
+            self.zoom_area_action,
             self.axis_limits_action,
             self.standardize_we_action,
             self.standardize_si_action,
@@ -2074,6 +2510,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.mode_combo,
             self.compare_combo,
             self.live_plot,
+            self.swap_xy_check,
             self.grid_check,
             self.logx_check,
             self.logy_check,
@@ -2081,6 +2518,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.line_width_spin,
             self.marker_combo,
             self.axis_limits_button,
+            self.zoom_area_button,
             self.load_workers_combo,
             self.plot_button,
             self.clear_button,
@@ -2089,6 +2527,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.load_selected_button,
             self.math_button,
             self.fft_options_panel,
+            self.comparison_options_panel,
         ):
             widget.setEnabled(enabled)
         for pane in self.selector_panes:
@@ -3189,7 +3628,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     actual_ix = ix
                 if actual_ix >= len(tab.columns):
                     continue
-                for iy in y_indices:
+                for selection_index, iy in enumerate(y_indices):
                     if project_mode:
                         if iy >= len(display_columns):
                             continue
@@ -3225,6 +3664,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     pd = PlotData()
                     pd.fromIDs(self.tab_list, len(plot_data), idx, same_col, pipeline=None)
                     pd.pane_index = pane_index
+                    pd.selection_index = selection_index
                     if project_mode:
                         pd.st = os.path.basename(tab.filename)
                     self.apply_plot_type(pd)
@@ -3233,6 +3673,18 @@ class MainWindow(QtWidgets.QMainWindow):
                     else:
                         pd.syl = pd.sy
                     plot_data.append(pd)
+        if self.plot_type_combo.currentText() == "Compare":
+            if len(plot_data) < 2:
+                self.statusBar().showMessage(
+                    "Compare requires at least two selected time series", 8000
+                )
+                return []
+            plot_data = compare_plot_data(
+                plot_data, self.comparison_method_combo.currentText()
+            )
+        if self.swap_xy_check.isChecked():
+            for pd in plot_data:
+                swap_plot_axes(pd)
         return plot_data
 
     def apply_plot_type(self, pd):
@@ -3320,6 +3772,29 @@ class MainWindow(QtWidgets.QMainWindow):
             points=meta.get("points", 0),
         )
         self.statusBar().showMessage(message)
+
+    @staticmethod
+    def _format_hover_value(value):
+        try:
+            value = float(value)
+        except (TypeError, ValueError):
+            return "N/A"
+        return "{:.7g}".format(value) if np.isfinite(value) else "N/A"
+
+    def on_plot_hover(self, coordinates):
+        if not coordinates:
+            self.coordinate_label.setText("X: --   Y: --")
+            return
+        prefix = ""
+        if coordinates.get("plot_count", 1) > 1:
+            prefix = "Plot {}   ".format(coordinates.get("plot_index", 0) + 1)
+        self.coordinate_label.setText(
+            "{}X: {}   Y: {}".format(
+                prefix,
+                self._format_hover_value(coordinates.get("x")),
+                self._format_hover_value(coordinates.get("y")),
+            )
+        )
 
     def highlight_curve_table(self, meta):
         table_index = meta.get("table_index")
@@ -3547,6 +4022,10 @@ class MainWindow(QtWidgets.QMainWindow):
         for plot in self.canvas._plots:
             plot.autoRange()
 
+    def on_zoom_area_toggled(self, enabled):
+        self.zoom_area_button.setChecked(enabled)
+        self.canvas.set_zoom_mode(enabled)
+
     def marker_symbol(self):
         return {
             "None": None,
@@ -3617,6 +4096,39 @@ class MainWindow(QtWidgets.QMainWindow):
             if action.isChecked()
         ]
 
+    def selected_stats_columns(self):
+        return [
+            key for key, _label, _numeric in _STATS_COLUMNS
+            if self.stats_column_actions[key].isChecked()
+        ]
+
+    def update_stats_columns_button(self):
+        count = len(self.selected_stats_columns())
+        self.stats_columns_button.setText("{} selected".format(count))
+        self.stats_columns_button.setToolTip(
+            "Select statistics displayed for each plotted time series"
+        )
+
+    def on_stats_columns_changed(self, _checked=False):
+        selected = self.selected_stats_columns()
+        self.settings.setValue("stats/columns", selected)
+        self.update_stats_columns_button()
+        self.update_stats()
+
+    def set_stats_columns(self, selected):
+        selected = set(selected)
+        for key, action in self.stats_column_actions.items():
+            action.blockSignals(True)
+            action.setChecked(key in selected)
+            action.blockSignals(False)
+        self.on_stats_columns_changed()
+
+    def select_all_stats_columns(self):
+        self.set_stats_columns(key for key, _label, _numeric in _STATS_COLUMNS)
+
+    def reset_stats_columns(self):
+        self.set_stats_columns(_DEFAULT_STATS_COLUMNS)
+
     def update_del_slopes_button(self):
         slopes = self.selected_del_slopes()
         self.del_slopes_button.setText(
@@ -3651,9 +4163,18 @@ class MainWindow(QtWidgets.QMainWindow):
         return item
 
     def update_stats(self):
+        selected = self.selected_stats_columns()
+        selected_set = set(selected)
+        selected_definitions = [
+            definition for definition in _STATS_COLUMNS
+            if definition[0] in selected_set
+        ]
         slopes = self.selected_del_slopes()
-        headers = ["Series", "File", "n", "Min", "Mean", "Max", "Std"]
+        headers = [label for _key, label, _numeric in selected_definitions]
         headers.extend("DEL m={} (1 Hz)".format(slope) for slope in slopes)
+        numeric_columns = [
+            numeric for _key, _label, numeric in selected_definitions
+        ] + [True] * len(slopes)
         self.stats_table.setSortingEnabled(False)
         self.stats_table.clear()
         self.stats_table.setColumnCount(len(headers))
@@ -3670,32 +4191,46 @@ class MainWindow(QtWidgets.QMainWindow):
                 continue
             if len(y_raw) == 0:
                 continue
+            statistics = _series_statistics(pd, x_raw, y_raw, selected)
             del_values = _equivalent_loads(x_raw, y_raw, slopes)
-            rows.append([
-                pd.syl or pd.sy,
-                os.path.basename(getattr(pd, "filename", "") or getattr(pd, "st", "")),
-                len(y_raw),
-                np.min(y_raw),
-                np.mean(y_raw),
-                np.max(y_raw),
-                np.std(y_raw),
-                *[del_values[slope] for slope in slopes],
-            ])
+            rows.append((
+                pd,
+                [statistics.get(key, np.nan if numeric else "")
+                 for key, _label, numeric in selected_definitions]
+                + [del_values[slope] for slope in slopes],
+            ))
 
         self.stats_table.setRowCount(len(rows))
-        for row_index, row_values in enumerate(rows):
+        for row_index, (pd, row_values) in enumerate(rows):
             for column_index, value in enumerate(row_values):
-                item = self._stats_table_item(value, numeric=column_index >= 2)
-                if column_index == 1:
-                    item.setToolTip(str(value))
+                item = self._stats_table_item(
+                    value, numeric=numeric_columns[column_index]
+                )
+                if column_index < len(selected_definitions):
+                    key = selected_definitions[column_index][0]
+                    if key == "file":
+                        item.setToolTip(
+                            getattr(pd, "filename", "") or getattr(pd, "st", "")
+                        )
                 self.stats_table.setItem(row_index, column_index, item)
         header = self.stats_table.horizontalHeader()
         header.setSectionResizeMode(QtWidgets.QHeaderView.ResizeToContents)
-        if headers:
-            header.setSectionResizeMode(0, QtWidgets.QHeaderView.Stretch)
-        if len(headers) > 1:
-            header.setSectionResizeMode(1, QtWidgets.QHeaderView.Interactive)
-            header.resizeSection(1, 150)
+        if "series" in selected:
+            header.setSectionResizeMode(
+                selected.index("series"), QtWidgets.QHeaderView.Stretch
+            )
+        if "file" in selected:
+            file_column = selected.index("file")
+            header.setSectionResizeMode(
+                file_column, QtWidgets.QHeaderView.Interactive
+            )
+            header.resizeSection(file_column, 150)
+        if "directory" in selected:
+            directory_column = selected.index("directory")
+            header.setSectionResizeMode(
+                directory_column, QtWidgets.QHeaderView.Interactive
+            )
+            header.resizeSection(directory_column, 220)
         self.stats_table.resizeRowsToContents()
 
     def export_plot_image(self):
