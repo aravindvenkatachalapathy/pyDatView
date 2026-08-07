@@ -36,6 +36,7 @@ setup(
         'scipy',
         'PySide6',
         'pyqtgraph',
+        'psutil',
     ],
     extras_require={
         'build': ['pyinstaller>=6'],

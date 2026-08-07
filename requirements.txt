@@ -9,3 +9,4 @@ chardet
 scipy
 PySide6
 pyqtgraph
+psutil

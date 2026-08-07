@@ -369,7 +369,7 @@ class BladedFile(File):
                 has_time = 'MIN' in info and 'STEP' in info
                 if has_time:
                     time = np.arange(info['nMajor'])*info['STEP'] + info['MIN']
-                    data = np.column_stack((time, data))
+                    dset['_time'] = time
                     info['ChannelName'].insert(0, 'Time')
                     info['ChannelUnit'].insert(0, 's')
 
@@ -406,7 +406,7 @@ class BladedFile(File):
                 has_time = 'MIN' in info and 'STEP' in info
                 if has_time:
                     time = np.arange(info['nMajor'])*info['STEP'] + info['MIN']
-                    data = np.column_stack((time, data))
+                    dset['_time'] = time
                     info['ChannelName'].insert(0, 'Time')
                     info['ChannelUnit'].insert(0, 's')
 
@@ -436,9 +436,14 @@ class BladedFile(File):
         dfs={}
         for k,dset in self.dataSets.items():
             BL_ChannelUnit = [ name+' ['+unit+']' for name,unit in zip(dset['sensors'],dset['units'])]
-            df = pd.DataFrame(data=dset['data'], columns=BL_ChannelUnit)
+            if '_time' in dset:
+                df = pd.DataFrame(data=dset['data'], columns=BL_ChannelUnit[1:])
+                df.insert(0, BL_ChannelUnit[0], dset['_time'])
+            else:
+                df = pd.DataFrame(data=dset['data'], columns=BL_ChannelUnit)
             # remove duplicate columns
-            df = df.loc[:,~df.columns.duplicated()]
+            if df.columns.duplicated().any():
+                df = df.loc[:,~df.columns.duplicated()]
             df.columns.name = k # hack for pyDatView when one dataframe is returned
             dfs[k] = df
         if len(dfs)==1:

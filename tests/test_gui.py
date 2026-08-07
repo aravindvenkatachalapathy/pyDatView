@@ -1,6 +1,7 @@
 import os
 import tempfile
 import unittest
+from collections import deque
 from types import SimpleNamespace
 
 import numpy as np
@@ -289,6 +290,50 @@ class TestGUI(unittest.TestCase):
             self.assertEqual(window.selected_lazy_indices(), [0])
             window.close()
             self.app.processEvents()
+
+    def test_bladed_batches_use_format_specific_worker_cap(self):
+        from pydatview.qt_main import LazyFileEntry, MainWindow
+
+        window = MainWindow()
+        file_format = SimpleNamespace(name="Bladed output file")
+        window.lazy_entries = [
+            LazyFileEntry("case_{}.$PJ".format(index), file_format)
+            for index in range(6)
+        ]
+        window.lazy_load_queue = deque((index, None) for index in range(6))
+        window.lazy_max_workers = 96
+        window.bladed_worker_cap = 2
+
+        self.assertEqual(window.effective_lazy_worker_limit(), 2)
+        window.close()
+        self.app.processEvents()
+
+    def test_low_memory_rejects_bladed_load_instead_of_starting_worker(self):
+        from pydatview.qt_main import LazyFileEntry, MainWindow
+
+        window = MainWindow()
+        file_format = SimpleNamespace(name="Bladed output file")
+        entry = LazyFileEntry(
+            "large_case.$PJ",
+            file_format,
+            estimated_load_bytes=2 * 1024 ** 3,
+            loading=True,
+        )
+        window.lazy_entries = [entry]
+        window.lazy_load_queue = deque([(0, None)])
+        window.available_memory_bytes = lambda: 1024 ** 3
+        window.begin_lazy_load_batch(1)
+
+        window.start_next_lazy_load()
+        window.finish_lazy_load_batch_if_done()
+
+        self.assertFalse(window.lazy_load_queue)
+        self.assertFalse(window.lazy_loader_threads)
+        self.assertTrue(entry.attempted)
+        self.assertIn("Not enough available memory", entry.warning)
+        self.assertFalse(window.loading_progress.isVisible())
+        window.close()
+        self.app.processEvents()
 
     def test_stats_table_supports_multiple_del_slopes(self):
         from pydatview.Tables import Table

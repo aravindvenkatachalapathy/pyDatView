@@ -220,81 +220,91 @@ fn read_bladed_binary(
     n_sensors: usize,
     n_dimens: usize,
     is_float64: bool,
-) -> PyResult<(Py<PyArray2<f64>>, usize)> {
-    let (data, inferred_major) = py.detach(|| -> PyResult<_> {
-        if n_dimens != 2 && n_dimens != 3 {
-            return Err(PyValueError::new_err(format!(
-                "Unsupported Bladed NDIMENS value: {}",
-                n_dimens
-            )));
-        }
-        if n_sections == 0 || n_sensors == 0 {
-            return Err(PyValueError::new_err(
-                "Bladed dimensions must include at least one section and one sensor",
-            ));
-        }
+) -> PyResult<(Py<PyAny>, usize)> {
+    if n_dimens != 2 && n_dimens != 3 {
+        return Err(PyValueError::new_err(format!(
+            "Unsupported Bladed NDIMENS value: {}",
+            n_dimens
+        )));
+    }
+    if n_sections == 0 || n_sensors == 0 {
+        return Err(PyValueError::new_err(
+            "Bladed dimensions must include at least one section and one sensor",
+        ));
+    }
 
-        let bytes = fs::read(filename).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        let value_size = if is_float64 { 8 } else { 4 };
-        let n_values = bytes.len() / value_size;
-        if n_values == 0 {
-            return Err(PyValueError::new_err(
-                "Bladed binary file contains no values",
-            ));
-        }
+    let value_size = if is_float64 { 8 } else { 4 };
+    let file_size = fs::metadata(filename)
+        .map_err(|e| PyValueError::new_err(e.to_string()))?
+        .len() as usize;
+    let n_values = file_size / value_size;
+    if n_values == 0 {
+        return Err(PyValueError::new_err(
+            "Bladed binary file contains no values",
+        ));
+    }
+    let values_per_step = if n_dimens == 3 {
+        n_sections
+            .checked_mul(n_sensors)
+            .ok_or_else(|| PyValueError::new_err("Bladed dimensions overflow"))?
+    } else {
+        n_sensors
+    };
+    let inferred_major = if n_major == 0 {
+        n_values / values_per_step
+    } else {
+        n_major
+    };
+    let expected_values = inferred_major
+        .checked_mul(values_per_step)
+        .ok_or_else(|| PyValueError::new_err("Bladed data size overflow"))?;
+    if n_values < expected_values {
+        return Err(PyValueError::new_err(format!(
+            "Bladed binary file is too short: {} values found, {} expected",
+            n_values, expected_values
+        )));
+    }
+    let n_cols = if n_dimens == 3 {
+        n_sections * n_sensors
+    } else {
+        n_sensors
+    };
 
-        let values_per_step = if n_dimens == 3 {
-            n_sections
-                .checked_mul(n_sensors)
-                .ok_or_else(|| PyValueError::new_err("Bladed dimensions overflow"))?
-        } else {
-            n_sensors
-        };
-        let inferred_major = if n_major == 0 {
-            n_values / values_per_step
-        } else {
-            n_major
-        };
-        let expected_values = inferred_major
-            .checked_mul(values_per_step)
-            .ok_or_else(|| PyValueError::new_err("Bladed data size overflow"))?;
-        if n_values < expected_values {
-            return Err(PyValueError::new_err(format!(
-                "Bladed binary file is too short: {} values found, {} expected",
-                n_values, expected_values
-            )));
-        }
-
-        let n_cols = if n_dimens == 3 {
-            n_sections * n_sensors
-        } else {
-            n_sensors
-        };
-        let mut data = Array2::<f64>::zeros((inferred_major, n_cols));
-        if is_float64 {
-            for i in 0..inferred_major {
-                for j in 0..n_cols {
-                    let offset = (i * values_per_step + j) * value_size;
-                    let mut chunk = [0_u8; 8];
-                    chunk.copy_from_slice(&bytes[offset..offset + 8]);
-                    data[[i, j]] = f64::from_le_bytes(chunk);
-                }
+    if is_float64 {
+        let data = py.detach(|| -> PyResult<Array2<f64>> {
+            let file = File::open(filename)
+                .map_err(|e| PyValueError::new_err(e.to_string()))?;
+            let mut reader = BufReader::new(file);
+            let mut values = Vec::with_capacity(expected_values);
+            for _ in 0..expected_values {
+                values.push(
+                    reader
+                        .read_f64::<LittleEndian>()
+                        .map_err(|e| PyValueError::new_err(e.to_string()))?,
+                );
             }
-        } else {
-            for i in 0..inferred_major {
-                for j in 0..n_cols {
-                    let offset = (i * values_per_step + j) * value_size;
-                    let mut chunk = [0_u8; 4];
-                    chunk.copy_from_slice(&bytes[offset..offset + 4]);
-                    data[[i, j]] = f32::from_le_bytes(chunk) as f64;
-                }
+            Array2::from_shape_vec((inferred_major, n_cols), values)
+                .map_err(|e| PyValueError::new_err(e.to_string()))
+        })?;
+        Ok((data.into_pyarray(py).unbind().into_any(), inferred_major))
+    } else {
+        let data = py.detach(|| -> PyResult<Array2<f32>> {
+            let file = File::open(filename)
+                .map_err(|e| PyValueError::new_err(e.to_string()))?;
+            let mut reader = BufReader::new(file);
+            let mut values = Vec::with_capacity(expected_values);
+            for _ in 0..expected_values {
+                values.push(
+                    reader
+                        .read_f32::<LittleEndian>()
+                        .map_err(|e| PyValueError::new_err(e.to_string()))?,
+                );
             }
-        }
-
-        Ok((data, inferred_major))
-    })?;
-
-    Ok((data.into_pyarray(py).unbind(), inferred_major))
+            Array2::from_shape_vec((inferred_major, n_cols), values)
+                .map_err(|e| PyValueError::new_err(e.to_string()))
+        })?;
+        Ok((data.into_pyarray(py).unbind().into_any(), inferred_major))
+    }
 }
 
 #[pymodule]

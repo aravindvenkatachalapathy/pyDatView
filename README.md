@@ -124,6 +124,12 @@ The extension must be compiled separately on every operating system and for
 every Python environment. Do not copy a compiled extension between Windows,
 macOS, and Linux.
 
+Bladed batches use a separate concurrency safety cap (two workers on Windows)
+and check available memory before starting each project. This cap applies even
+when the global worker selector is higher. The Rust reader preserves float32
+Bladed data at native precision to reduce retained memory; rebuild the Rust
+extension after updating pyDatView to receive this change.
+
 ## Scan and Selective Loading
 
 **Scan folder** creates a lightweight file index. For OpenFAST `.outb` and

@@ -67,6 +67,7 @@ class LazyFileEntry:
     header_attempted: bool = False
     loaded_column_indices: set = field(default_factory=set)
     full_loaded: bool = False
+    estimated_load_bytes: int = 0
 
     @property
     def loaded(self):
@@ -1264,8 +1265,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.lazy_load_queue = deque()
         self.lazy_loader_threads = {}
         self.lazy_loader_workers = {}
+        self.lazy_memory_reservations = {}
+        self._directory_file_sizes = {}
         self.lazy_generation = 0
         self.lazy_max_workers = _default_lazy_workers()
+        self.bladed_worker_cap = 2 if sys.platform.startswith("win") else 4
         self.lazy_warning_backlog = []
         self.lazy_item_widgets = {}
         self.lazy_loaded_total = 0
@@ -1339,7 +1343,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.axis_limits_button.setToolTip("Set X and Y plot limits")
         self.load_workers_combo = QtWidgets.QComboBox()
         self.load_workers_combo.addItems(["Auto", "1", "2", "4", "8", "16", "32", "64", "96"])
-        self.load_workers_combo.setToolTip("Maximum parallel file load workers. Auto is capped on Windows to reduce UI hangs.")
+        self.load_workers_combo.setToolTip(
+            "Maximum parallel file workers. Bladed projects use a separate safety cap "
+            "of {} worker(s) to limit native-decoder memory pressure.".format(
+                self.bladed_worker_cap
+            )
+        )
         self.loading_progress = QtWidgets.QProgressBar()
         self.loading_progress.setRange(0, 1)
         self.loading_progress.setValue(0)
@@ -2030,7 +2039,13 @@ class MainWindow(QtWidgets.QMainWindow):
             self.lazy_max_workers = _default_lazy_workers()
         else:
             self.lazy_max_workers = max(1, min(max(1, os.cpu_count() or 1), int(text)))
-        self.statusBar().showMessage("Parallel file load workers: {}".format(self.lazy_max_workers), 8000)
+        self.statusBar().showMessage(
+            "Parallel workers: {} overall, {} for Bladed".format(
+                self.lazy_max_workers,
+                min(self.lazy_max_workers, self.bladed_worker_cap),
+            ),
+            8000,
+        )
         self.start_next_lazy_load()
 
     def set_loading_controls_enabled(self, enabled):
@@ -2123,6 +2138,17 @@ class MainWindow(QtWidgets.QMainWindow):
         self.flush_lazy_selection_refresh()
         self.lazy_selected_batch = set()
         self.set_loading_controls_enabled(True)
+        if self.lazy_warning_backlog:
+            warning_count = len(self.lazy_warning_backlog)
+            first_warning = self.lazy_warning_backlog[0].splitlines()[0]
+            self.lazy_warning_backlog = []
+            self.statusBar().showMessage(
+                "{} load warning(s): {}".format(
+                    warning_count,
+                    first_warning,
+                ),
+                20000,
+            )
 
     def flush_lazy_selection_refresh(self):
         needs_plot = self.plot_after_lazy_load
@@ -2212,6 +2238,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.lazy_generation += 1
                 self.lazy_load_queue = deque()
                 self.lazy_warning_backlog = []
+                self.lazy_memory_reservations = {}
                 self.lazy_entries = []
                 self.lazy_item_widgets = {}
                 self.lazy_loaded_total = 0
@@ -2315,6 +2342,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.lazy_generation += 1
         self.lazy_load_queue = deque()
         self.lazy_warning_backlog = []
+        self.lazy_memory_reservations = {}
         self.lazy_item_widgets = {}
         self.lazy_loaded_total = 0
         self.lazy_selected_batch = set()
@@ -2382,6 +2410,93 @@ class MainWindow(QtWidgets.QMainWindow):
     def is_lazy_queued(self, lazy_index):
         return any(item[0] == lazy_index for item in self.lazy_load_queue)
 
+    @staticmethod
+    def is_bladed_entry(entry):
+        return getattr(entry.file_format, "name", "") == "Bladed output file"
+
+    @staticmethod
+    def available_memory_bytes():
+        try:
+            import psutil
+            return int(psutil.virtual_memory().available)
+        except Exception:
+            return None
+
+    def estimate_lazy_load_bytes(self, entry):
+        if entry.estimated_load_bytes > 0:
+            return entry.estimated_load_bytes
+        source_bytes = max(0, int(entry.size))
+        if self.is_bladed_entry(entry) and self.is_bladed_project_path(entry.path):
+            directory = os.path.dirname(os.path.abspath(entry.path))
+            directory_key = os.path.normcase(directory)
+            if directory_key not in self._directory_file_sizes:
+                files = []
+                try:
+                    with os.scandir(directory) as entries:
+                        for candidate in entries:
+                            try:
+                                if candidate.is_file(follow_symlinks=False):
+                                    files.append((candidate.name.lower(), candidate.stat().st_size))
+                            except OSError:
+                                continue
+                except OSError:
+                    pass
+                self._directory_file_sizes[directory_key] = files
+            project_root = os.path.splitext(os.path.basename(entry.path))[0].lower()
+            binary_prefix = project_root + ".$"
+            source_bytes = sum(
+                size for name, size in self._directory_file_sizes[directory_key]
+                if name.startswith(binary_prefix)
+            ) or source_bytes
+        # Dataframes, index columns, and decoder scratch space add overhead.
+        entry.estimated_load_bytes = max(
+            64 * 1024 * 1024,
+            int(source_bytes * 2.0),
+        )
+        return entry.estimated_load_bytes
+
+    def effective_lazy_worker_limit(self):
+        has_bladed = any(
+            self.is_bladed_entry(self.lazy_entries[index])
+            for index in self.lazy_loader_threads
+            if index < len(self.lazy_entries)
+        ) or any(
+            index < len(self.lazy_entries) and self.is_bladed_entry(self.lazy_entries[index])
+            for index, _channels in self.lazy_load_queue
+        )
+        if has_bladed:
+            return min(self.lazy_max_workers, self.bladed_worker_cap)
+        return self.lazy_max_workers
+
+    def lazy_memory_allows_start(self, entry):
+        available = self.available_memory_bytes()
+        if available is None:
+            return True, ""
+        required = self.estimate_lazy_load_bytes(entry)
+        reserved = sum(self.lazy_memory_reservations.values())
+        reserve_floor = max(1024 ** 3, int(available * 0.10))
+        if available - reserved - required >= reserve_floor:
+            return True, ""
+        return False, (
+            "Not enough available memory to load {} safely: estimated {:.2f} GB "
+            "required with {:.2f} GB available. Reduce the selection, unload data, "
+            "or lower the worker count."
+        ).format(
+            entry.basename,
+            required / 1024 ** 3,
+            max(0, available - reserved) / 1024 ** 3,
+        )
+
+    def reject_lazy_load(self, lazy_index, warning):
+        entry = self.lazy_entries[lazy_index]
+        entry.loading = False
+        entry.attempted = not entry.loaded
+        entry.warning = warning
+        self.lazy_warning_backlog.append(warning)
+        self.advance_lazy_load_progress()
+        self.update_lazy_item(lazy_index)
+        print("[pyDatView] {}".format(warning))
+
     def ensure_lazy_loaded(
             self,
             lazy_index,
@@ -2442,7 +2557,27 @@ class MainWindow(QtWidgets.QMainWindow):
         self.start_next_lazy_load()
 
     def start_next_lazy_load(self):
-        while len(self.lazy_loader_threads) < self.lazy_max_workers and self.lazy_load_queue:
+        while self.lazy_load_queue:
+            if len(self.lazy_loader_threads) >= self.effective_lazy_worker_limit():
+                break
+            lazy_index, _channel_indices = self.lazy_load_queue[0]
+            if lazy_index >= len(self.lazy_entries):
+                self.lazy_load_queue.popleft()
+                continue
+            allowed, warning = self.lazy_memory_allows_start(
+                self.lazy_entries[lazy_index]
+            )
+            if not allowed:
+                if self.lazy_loader_threads:
+                    self.statusBar().showMessage(
+                        "Waiting for memory before loading {}".format(
+                            self.lazy_entries[lazy_index].basename
+                        )
+                    )
+                    break
+                self.lazy_load_queue.popleft()
+                self.reject_lazy_load(lazy_index, warning)
+                continue
             self.start_one_lazy_load()
 
     def start_one_lazy_load(self):
@@ -2453,6 +2588,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.start_next_lazy_load()
             return
         entry = self.lazy_entries[lazy_index]
+        self.lazy_memory_reservations[lazy_index] = self.estimate_lazy_load_bytes(entry)
         if self.lazy_batch_total <= 1:
             self.status_label.setText("Loading {}".format(entry.basename))
             self.statusBar().showMessage("Loading {}".format(entry.path))
@@ -2539,6 +2675,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def on_lazy_thread_finished(self, lazy_index):
         self.lazy_loader_threads.pop(lazy_index, None)
         self.lazy_loader_workers.pop(lazy_index, None)
+        self.lazy_memory_reservations.pop(lazy_index, None)
         self.start_next_lazy_load()
         self.finish_lazy_load_batch_if_done()
 
@@ -2576,6 +2713,7 @@ class MainWindow(QtWidgets.QMainWindow):
             )
         if not pending:
             self.lazy_selected_batch = set()
+        self.finish_lazy_load_batch_if_done()
         self.on_table_selection_changed()
 
     def load_dfs(self, dataframes, names=None):
@@ -2588,6 +2726,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.lazy_generation += 1
         self.lazy_load_queue = deque()
         self.lazy_warning_backlog = []
+        self.lazy_memory_reservations = {}
         self.lazy_entries = []
         self.lazy_item_widgets = {}
         self.lazy_loaded_total = 0
@@ -2603,6 +2742,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.lazy_generation += 1
             self.lazy_load_queue = deque()
             self.lazy_warning_backlog = []
+            self.lazy_memory_reservations = {}
             self.lazy_batch_total = 0
             self.lazy_batch_done = 0
             self.loading_progress.setVisible(False)
