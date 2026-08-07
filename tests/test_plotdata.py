@@ -26,6 +26,26 @@ class TestPlotData(unittest.TestCase):
         self.assertAlmostEqual(Y[i],A)
         self.assertAlmostEqual(f[i],f0)
 
+    def test_FFT_period_axis_is_finite_and_returns_info(self):
+        dt = 0.05
+        f0 = 2.0
+        t = np.arange(0, 10, dt)
+        y = 3.0 * np.sin(2 * np.pi * f0 * t)
+
+        PD = PlotData(t, y)
+        info = PD.toFFT(
+            yType='Amplitude',
+            xType='x',
+            avgMethod='None',
+            bDetrend=False,
+        )
+
+        self.assertIsNotNone(info)
+        self.assertTrue(np.all(np.isfinite(PD.x)))
+        peak = np.argmax(PD.y)
+        self.assertAlmostEqual(PD.x[peak], 1 / f0)
+        self.assertAlmostEqual(PD.y[peak], 3.0)
+
     def test_MinMax(self):
         # Test Min Max scaling (between 0 and 1)
         x = np.linspace(-2,2,100)

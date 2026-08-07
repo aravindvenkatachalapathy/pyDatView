@@ -251,6 +251,144 @@ class TestGUI(unittest.TestCase):
         window.close()
         self.app.processEvents()
 
+    def test_scan_append_keeps_loaded_entries_and_selection(self):
+        from pydatview.Tables import Table
+        from pydatview.qt_main import MainWindow
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            first_path = os.path.join(temp_dir, "first.out")
+            second_path = os.path.join(temp_dir, "second.out")
+            for path in (first_path, second_path):
+                with open(path, "w", encoding="ascii"):
+                    pass
+            file_format = SimpleNamespace(name="FAST output file")
+            window = MainWindow()
+            window.set_lazy_file_index([(first_path, file_format)])
+            old_entry = window.lazy_entries[0]
+            old_table = Table(
+                data=pd.DataFrame({"Time [s]": [0.0, 1.0], "Load [N]": [1.0, 2.0]}),
+                name="first",
+                filename=first_path,
+            )
+            window.tab_list.append(old_table)
+            old_entry.table_indices = [0]
+            old_entry.full_loaded = True
+            window.lazy_loaded_total = 1
+            window.populate_tables()
+
+            added = window.set_lazy_file_index(
+                [(first_path, file_format), (second_path, file_format)],
+                append=True,
+            )
+
+            self.assertEqual(added, 1)
+            self.assertEqual(len(window.lazy_entries), 2)
+            self.assertIs(window.lazy_entries[0], old_entry)
+            self.assertIs(window.tab_list[0], old_table)
+            self.assertEqual(window.lazy_loaded_count(), 1)
+            self.assertEqual(window.selected_lazy_indices(), [0])
+            window.close()
+            self.app.processEvents()
+
+    def test_stats_table_supports_multiple_del_slopes(self):
+        from pydatview.Tables import Table
+        from pydatview.qt_main import MainWindow
+        from pydatview.tools.fatigue import equivalent_load
+
+        window = MainWindow()
+        time = np.arange(0.0, 20.0, 0.05)
+        load = 5.0 * np.sin(2.0 * np.pi * time)
+        window.tab_list.append(Table(
+            data=pd.DataFrame({"Time [s]": time, "Load [N]": load}),
+            name="fatigue",
+            filename="fatigue.out",
+        ))
+        window.populate_tables()
+        pane = window.selector_panes[0]
+        pane.y_list_widget.clearSelection()
+        for row in range(pane.y_list_widget.count()):
+            item = pane.y_list_widget.item(row)
+            if item.text() == "Load [N]":
+                item.setSelected(True)
+        for slope, action in window.del_slope_actions.items():
+            action.blockSignals(True)
+            action.setChecked(slope in (2, 4))
+            action.blockSignals(False)
+        window.update_del_slopes_button()
+        window.plot_data = window.build_plot_data()
+        window.update_stats()
+
+        headers = [
+            window.stats_table.horizontalHeaderItem(column).text()
+            for column in range(window.stats_table.columnCount())
+        ]
+        self.assertEqual(window.stats_table.rowCount(), 1)
+        self.assertIn("DEL m=2 (1 Hz)", headers)
+        self.assertIn("DEL m=4 (1 Hz)", headers)
+        for slope in (2, 4):
+            actual = float(
+                window.stats_table.item(
+                    0,
+                    headers.index("DEL m={} (1 Hz)".format(slope)),
+                ).text()
+            )
+            expected = equivalent_load(
+                time,
+                load,
+                m=slope,
+                Teq=1,
+                bins=100,
+                method="rainflow_windap",
+            )
+            self.assertAlmostEqual(actual, expected, places=4)
+        window.close()
+        self.app.processEvents()
+
+    def test_fft_controls_apply_amplitude_without_averaging(self):
+        from pydatview.Tables import Table
+        from pydatview.qt_main import MainWindow, NumericAxisItem
+
+        window = MainWindow()
+        time = np.arange(0.0, 20.0, 0.05)
+        load = 5.0 * np.sin(2.0 * np.pi * time)
+        window.tab_list.append(Table(
+            data=pd.DataFrame({"Time [s]": time, "Load [N]": load}),
+            name="fft",
+            filename="fft.out",
+        ))
+        window.populate_tables()
+        pane = window.selector_panes[0]
+        pane.y_list_widget.clearSelection()
+        for row in range(pane.y_list_widget.count()):
+            item = pane.y_list_widget.item(row)
+            if item.text() == "Load [N]":
+                item.setSelected(True)
+        window.plot_type_combo.setCurrentText("FFT")
+        window.redraw_timer.stop()
+        window.fft_output_combo.setCurrentText("Amplitude")
+        window.fft_averaging_combo.setCurrentText("None")
+        window.fft_x_combo.setCurrentIndex(window.fft_x_combo.findData("1/x"))
+        window.fft_detrend_check.setChecked(False)
+        window.redraw_timer.stop()
+
+        plot_data = window.build_plot_data()
+        self.assertFalse(window.fft_options_panel.isHidden())
+        self.assertTrue(window.logy_check.isChecked())
+        axis = NumericAxisItem(orientation="left")
+        axis.logMode = True
+        self.assertEqual(
+            axis.tickStrings([-3.0, -2.0, -1.5, 0.0, 2.0], 1.0, 1.0),
+            ["10^-3", "10^-2", "", "10^0", "10^2"],
+        )
+        self.assertEqual(len(plot_data), 1)
+        peak = int(np.argmax(plot_data[0].y))
+        self.assertAlmostEqual(plot_data[0].x[peak], 1.0, places=6)
+        self.assertAlmostEqual(plot_data[0].y[peak], 5.0, places=6)
+        window.plot_type_combo.setCurrentText("Regular")
+        self.assertFalse(window.logy_check.isChecked())
+        window.close()
+        self.app.processEvents()
+
 
 if __name__ == "__main__":
     unittest.main()

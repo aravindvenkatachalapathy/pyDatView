@@ -395,6 +395,41 @@ def _finite_xy(x, y):
     return x[finite], y[finite]
 
 
+def _equivalent_loads(time_values, signal_values, slopes):
+    """Return 1 Hz DEL values while performing rainflow counting only once."""
+    from pydatview.tools.fatigue import find_range_count
+
+    slopes = tuple(int(slope) for slope in slopes)
+    if not slopes:
+        return {}
+    try:
+        time_values, signal_values = _finite_xy(time_values, signal_values)
+        if len(time_values) < 2:
+            raise ValueError("Not enough finite samples")
+        duration = float(time_values[-1] - time_values[0])
+        if not np.isfinite(duration) or duration <= 0:
+            raise ValueError("Time duration must be positive")
+        cycles, ranges, _ = find_range_count(
+            signal_values,
+            bins=100,
+            method="rainflow_windap",
+            meanBin=True,
+            binStartAt0=False,
+        )
+        cycles = np.asarray(cycles, dtype=float)
+        ranges = np.asarray(ranges, dtype=float)
+        if cycles.ndim == 0 or ranges.ndim == 0:
+            raise ValueError("Rainflow counting failed")
+        values = {}
+        with np.errstate(over="ignore", invalid="ignore"):
+            for slope in slopes:
+                damage = np.sum(np.power(ranges, slope) * cycles / duration)
+                values[slope] = float(np.power(damage, 1.0 / slope))
+        return values
+    except Exception:
+        return {slope: np.nan for slope in slopes}
+
+
 def _plot_ready_xy(x, y, logx=False, logy=False):
     x, y = _finite_xy(x, y)
     if not logx and not logy:
@@ -602,7 +637,7 @@ def _default_lazy_workers():
 class NumericAxisItem(pg.AxisItem):
     def tickStrings(self, values, scale, spacing):
         if self.logMode:
-            return super().tickStrings(values, scale, spacing)
+            return self.logTickStrings(values, scale, spacing)
         labels = []
         for value in values:
             v = value * scale
@@ -614,6 +649,21 @@ class NumericAxisItem(pg.AxisItem):
                 labels.append("{:.3f}".format(v).rstrip("0").rstrip("."))
             else:
                 labels.append("{:.4f}".format(v).rstrip("0").rstrip("."))
+        return labels
+
+    def logTickStrings(self, values, scale, spacing):
+        if not np.isfinite(scale) or scale <= 0:
+            return [""] * len(values)
+        scale_exponent = np.log10(scale)
+        labels = []
+        for value in values:
+            exponent = float(value) + scale_exponent
+            rounded = int(round(exponent))
+            labels.append(
+                "10^{}".format(rounded)
+                if abs(exponent - rounded) < 1e-8
+                else ""
+            )
         return labels
 
 
@@ -872,6 +922,15 @@ class ScanDialog(QtWidgets.QDialog):
         self.recursive_check.setChecked(self.settings.value("scan/recursive", True, type=bool))
         root.addWidget(self.recursive_check)
 
+        self.keep_existing_check = QtWidgets.QCheckBox("Keep files from previous scans")
+        self.keep_existing_check.setChecked(
+            self.settings.value("scan/keep_existing", False, type=bool)
+        )
+        self.keep_existing_check.setToolTip(
+            "Append new matches to the current scan index without unloading or removing existing files"
+        )
+        root.addWidget(self.keep_existing_check)
+
         bladed_row = QtWidgets.QHBoxLayout()
         bladed_row.addWidget(QtWidgets.QLabel("Bladed suffixes"))
         self.bladed_suffix_edit = QtWidgets.QLineEdit()
@@ -974,6 +1033,9 @@ class ScanDialog(QtWidgets.QDialog):
     def bladed_suffixes(self):
         return _parse_bladed_suffixes(self.bladed_suffix_edit.text())
 
+    def keep_existing(self):
+        return self.keep_existing_check.isChecked()
+
     def accept(self):
         if not os.path.isdir(self.selected_folder()):
             QtWidgets.QMessageBox.warning(self, "Scan folder", "Select a valid folder.")
@@ -988,6 +1050,7 @@ class ScanDialog(QtWidgets.QDialog):
         ]
         self.settings.setValue("scan/folder", self.selected_folder())
         self.settings.setValue("scan/recursive", self.recursive())
+        self.settings.setValue("scan/keep_existing", self.keep_existing())
         self.settings.setValue("scan/bladed_suffixes", self.bladed_suffix_edit.text().strip())
         self.settings.setValue("scan/formats", selected_formats)
         self.settings.setValue("scan/geometry", self.saveGeometry())
@@ -1215,6 +1278,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.lazy_batch_done = 0
         self.active_selector_pane = None
         self.axis_limits = {key: None for key in ("xmin", "xmax", "ymin", "ymax")}
+        self._previous_plot_type = "Regular"
+        self._regular_logy = False
         self.redraw_timer = QtCore.QTimer(self)
         self.redraw_timer.setSingleShot(True)
         self.redraw_timer.setInterval(40)
@@ -1311,6 +1376,74 @@ class MainWindow(QtWidgets.QMainWindow):
         load_controls.addWidget(self.loading_progress)
         top.addLayout(load_controls, 1, 10)
 
+        self.fft_options_panel = QtWidgets.QFrame()
+        self.fft_options_panel.setObjectName("plotControls")
+        fft_layout = QtWidgets.QGridLayout(self.fft_options_panel)
+        fft_layout.setContentsMargins(10, 6, 10, 6)
+        fft_layout.setHorizontalSpacing(8)
+        fft_layout.setVerticalSpacing(5)
+        self.fft_output_combo = QtWidgets.QComboBox()
+        self.fft_output_combo.addItems(["PSD", "f x PSD", "Amplitude"])
+        self.fft_averaging_combo = QtWidgets.QComboBox()
+        self.fft_averaging_combo.addItems(["None", "Welch", "Binning"])
+        self.fft_averaging_combo.setCurrentText("Welch")
+        self.fft_window_combo = QtWidgets.QComboBox()
+        self.fft_window_combo.addItems(["Hamming", "Hann", "Rectangular"])
+        self.fft_x_combo = QtWidgets.QComboBox()
+        self.fft_x_combo.addItem("Frequency [1/x]", "1/x")
+        self.fft_x_combo.addItem("Cyclic frequency [2pi/x]", "2pi/x")
+        self.fft_x_combo.addItem("Period [x]", "x")
+        self.fft_detrend_check = QtWidgets.QCheckBox("Detrend")
+        self.fft_detrend_check.setChecked(False)
+        self.fft_nexp_spin = QtWidgets.QSpinBox()
+        self.fft_nexp_spin.setRange(3, 30)
+        self.fft_nexp_spin.setValue(11)
+        self.fft_nexp_spin.setToolTip("Welch segment length as a power of two")
+        self.fft_window_length_label = QtWidgets.QLabel("2048 samples")
+        self.fft_bins_spin = QtWidgets.QSpinBox()
+        self.fft_bins_spin.setRange(3, 200)
+        self.fft_bins_spin.setValue(20)
+        self.fft_bins_spin.setToolTip("Number of logarithmic frequency bins per decade")
+        self.fft_output_combo.setCurrentText(
+            str(self.settings.value("fft/output", "PSD"))
+        )
+        self.fft_averaging_combo.setCurrentText(
+            str(self.settings.value("fft/averaging", "Welch"))
+        )
+        self.fft_window_combo.setCurrentText(
+            str(self.settings.value("fft/window", "Hamming"))
+        )
+        saved_x_type = str(self.settings.value("fft/x_type", "1/x"))
+        saved_x_index = self.fft_x_combo.findData(saved_x_type)
+        self.fft_x_combo.setCurrentIndex(max(0, saved_x_index))
+        self.fft_detrend_check.setChecked(
+            self.settings.value("fft/detrend", False, type=bool)
+        )
+        self.fft_nexp_spin.setValue(
+            self.settings.value("fft/n_exp", 11, type=int)
+        )
+        self.fft_bins_spin.setValue(
+            self.settings.value("fft/bins_per_decade", 20, type=int)
+        )
+
+        fft_layout.addWidget(QtWidgets.QLabel("Spectrum"), 0, 0)
+        fft_layout.addWidget(self.fft_output_combo, 0, 1)
+        fft_layout.addWidget(QtWidgets.QLabel("Averaging"), 0, 2)
+        fft_layout.addWidget(self.fft_averaging_combo, 0, 3)
+        fft_layout.addWidget(QtWidgets.QLabel("Window"), 0, 4)
+        fft_layout.addWidget(self.fft_window_combo, 0, 5)
+        fft_layout.addWidget(QtWidgets.QLabel("X axis"), 0, 6)
+        fft_layout.addWidget(self.fft_x_combo, 0, 7)
+        fft_layout.addWidget(self.fft_detrend_check, 0, 8)
+        fft_layout.addWidget(QtWidgets.QLabel("Welch 2^n"), 1, 0)
+        fft_layout.addWidget(self.fft_nexp_spin, 1, 1)
+        fft_layout.addWidget(self.fft_window_length_label, 1, 2, 1, 2)
+        fft_layout.addWidget(QtWidgets.QLabel("Bins/decade"), 1, 4)
+        fft_layout.addWidget(self.fft_bins_spin, 1, 5)
+        fft_layout.setColumnStretch(9, 1)
+        self.fft_options_panel.setVisible(False)
+        root.addWidget(self.fft_options_panel)
+
         self.main_splitter = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
         self.main_splitter.setChildrenCollapsible(False)
         root.addWidget(self.main_splitter, 1)
@@ -1358,10 +1491,43 @@ class MainWindow(QtWidgets.QMainWindow):
         self.table_view.horizontalHeader().setStretchLastSection(False)
         self.info_text = QtWidgets.QPlainTextEdit()
         self.info_text.setReadOnly(True)
-        self.stats_text = QtWidgets.QPlainTextEdit()
-        self.stats_text.setReadOnly(True)
+        self.stats_panel = QtWidgets.QWidget()
+        stats_layout = QtWidgets.QVBoxLayout(self.stats_panel)
+        stats_layout.setContentsMargins(6, 6, 6, 6)
+        stats_layout.setSpacing(5)
+        stats_controls = QtWidgets.QHBoxLayout()
+        stats_controls.addWidget(QtWidgets.QLabel("DEL slopes"))
+        self.del_slopes_button = QtWidgets.QToolButton()
+        self.del_slopes_button.setPopupMode(QtWidgets.QToolButton.InstantPopup)
+        self.del_slopes_menu = QtWidgets.QMenu(self.del_slopes_button)
+        self.del_slope_actions = {}
+        saved_slopes = self.settings.value("stats/del_slopes", [4])
+        if isinstance(saved_slopes, str):
+            saved_slopes = [saved_slopes]
+        try:
+            saved_slopes = {int(value) for value in saved_slopes}
+        except (TypeError, ValueError):
+            saved_slopes = {4}
+        for slope in range(2, 14):
+            action = self.del_slopes_menu.addAction("m = {}".format(slope))
+            action.setCheckable(True)
+            action.setChecked(slope in saved_slopes)
+            action.toggled.connect(self.on_del_slopes_changed)
+            self.del_slope_actions[slope] = action
+        self.del_slopes_button.setMenu(self.del_slopes_menu)
+        stats_controls.addWidget(self.del_slopes_button)
+        stats_controls.addStretch(1)
+        stats_layout.addLayout(stats_controls)
+        self.stats_table = QtWidgets.QTableWidget()
+        self.stats_table.setAlternatingRowColors(True)
+        self.stats_table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
+        self.stats_table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
+        self.stats_table.setSelectionMode(QtWidgets.QAbstractItemView.SingleSelection)
+        self.stats_table.verticalHeader().setVisible(False)
+        stats_layout.addWidget(self.stats_table, 1)
+        self.update_del_slopes_button()
         self.detail_tabs.addTab(self.table_view, "Data")
-        self.detail_tabs.addTab(self.stats_text, "Stats")
+        self.detail_tabs.addTab(self.stats_panel, "Stats")
         self.detail_tabs.addTab(self.info_text, "File info")
 
         right_splitter = QtWidgets.QSplitter(QtCore.Qt.Vertical)
@@ -1781,7 +1947,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.math_action.triggered.connect(self.open_calculation_dialog)
 
     def _connect(self):
-        self.plot_type_combo.currentIndexChanged.connect(self.on_selection_changed)
+        self.plot_type_combo.currentIndexChanged.connect(self.on_plot_type_changed)
         self.mode_combo.currentIndexChanged.connect(self.on_selection_changed)
         self.compare_combo.currentIndexChanged.connect(self.on_compare_mode_changed)
         self.grid_check.stateChanged.connect(self.on_selection_changed)
@@ -1799,6 +1965,53 @@ class MainWindow(QtWidgets.QMainWindow):
         self.select_none_y_button.clicked.connect(self.select_none_y)
         self.load_selected_button.clicked.connect(self.load_selected_lazy_files)
         self.math_button.clicked.connect(self.open_calculation_dialog)
+        for combo in (
+            self.fft_output_combo,
+            self.fft_averaging_combo,
+            self.fft_window_combo,
+            self.fft_x_combo,
+        ):
+            combo.currentIndexChanged.connect(self.on_fft_options_changed)
+        self.fft_detrend_check.stateChanged.connect(self.on_fft_options_changed)
+        self.fft_nexp_spin.valueChanged.connect(self.on_fft_options_changed)
+        self.fft_bins_spin.valueChanged.connect(self.on_fft_options_changed)
+
+    def on_plot_type_changed(self):
+        plot_type = self.plot_type_combo.currentText()
+        is_fft = plot_type == "FFT"
+        if is_fft and self._previous_plot_type != "FFT":
+            self._regular_logy = self.logy_check.isChecked()
+            self.logy_check.blockSignals(True)
+            self.logy_check.setChecked(True)
+            self.logy_check.blockSignals(False)
+        elif not is_fft and self._previous_plot_type == "FFT":
+            self.logy_check.blockSignals(True)
+            self.logy_check.setChecked(self._regular_logy)
+            self.logy_check.blockSignals(False)
+        self._previous_plot_type = plot_type
+        self.fft_options_panel.setVisible(is_fft)
+        self.update_fft_control_states()
+        self.on_selection_changed()
+
+    def update_fft_control_states(self):
+        averaging = self.fft_averaging_combo.currentText()
+        self.fft_window_combo.setEnabled(averaging == "Welch")
+        self.fft_nexp_spin.setEnabled(averaging == "Welch")
+        self.fft_bins_spin.setEnabled(averaging == "Binning")
+        self.fft_window_length_label.setText(
+            "{:,} samples".format(2 ** self.fft_nexp_spin.value())
+        )
+
+    def on_fft_options_changed(self, _value=None):
+        self.update_fft_control_states()
+        self.settings.setValue("fft/output", self.fft_output_combo.currentText())
+        self.settings.setValue("fft/averaging", self.fft_averaging_combo.currentText())
+        self.settings.setValue("fft/window", self.fft_window_combo.currentText())
+        self.settings.setValue("fft/x_type", self.fft_x_combo.currentData())
+        self.settings.setValue("fft/detrend", self.fft_detrend_check.isChecked())
+        self.settings.setValue("fft/n_exp", self.fft_nexp_spin.value())
+        self.settings.setValue("fft/bins_per_decade", self.fft_bins_spin.value())
+        self.on_selection_changed()
 
     def on_compare_mode_changed(self):
         self.set_compare_pane_count(self.compare_pane_count())
@@ -1853,6 +2066,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.select_none_y_button,
             self.load_selected_button,
             self.math_button,
+            self.fft_options_panel,
         ):
             widget.setEnabled(enabled)
         for pane in self.selector_panes:
@@ -1968,9 +2182,17 @@ class MainWindow(QtWidgets.QMainWindow):
             self.statusBar().showMessage("Scan found no files in {:.3f}s".format(scan_seconds), 8000)
             return
 
-        self.set_lazy_file_index(matches)
+        added = self.set_lazy_file_index(
+            matches,
+            append=dialog.keep_existing(),
+        )
         self.statusBar().showMessage(
-            "Indexed {:,} files in {:.3f}s; loaded 0".format(len(matches), scan_seconds),
+            "Indexed {:,} new files in {:.3f}s; {:,} total, {:,} loaded".format(
+                added,
+                scan_seconds,
+                len(self.lazy_entries),
+                self.lazy_loaded_count(),
+            ),
             12000,
         )
 
@@ -2034,7 +2256,62 @@ class MainWindow(QtWidgets.QMainWindow):
             self.show_exception("Failed to load files", exc)
             return None
 
-    def set_lazy_file_index(self, matches):
+    @staticmethod
+    def normalized_file_path(path):
+        return os.path.normcase(os.path.abspath(path))
+
+    def selected_lazy_paths_by_pane(self):
+        selected = []
+        for pane in self.visible_selector_panes():
+            selected.append({
+                self.normalized_file_path(
+                    self.lazy_entries[data[1]].path
+                )
+                for item in pane.table_list_widget.selectedItems()
+                for data in [item.data(QtCore.Qt.UserRole)]
+                if isinstance(data, tuple) and data[0] == "lazy"
+            })
+        return selected
+
+    def set_lazy_file_index(self, matches, append=False):
+        if append and self.lazy_entries:
+            selected_paths = self.selected_lazy_paths_by_pane()
+            known_paths = {
+                self.normalized_file_path(entry.path)
+                for entry in self.lazy_entries
+            }
+            added = 0
+            for path, fmt in matches:
+                normalized = self.normalized_file_path(path)
+                if normalized in known_paths:
+                    continue
+                try:
+                    stat = os.stat(path)
+                    size = stat.st_size
+                    mtime = stat.st_mtime
+                except OSError:
+                    size = 0
+                    mtime = 0.0
+                self.lazy_entries.append(
+                    LazyFileEntry(
+                        path=path,
+                        file_format=fmt,
+                        size=size,
+                        mtime=mtime,
+                    )
+                )
+                known_paths.add(normalized)
+                added += 1
+            self.current_files = [entry.path for entry in self.lazy_entries]
+            self.populate_tables(selected_lazy_paths=selected_paths)
+            self.status_label.setText(
+                "{:,} files indexed, {:,} loaded".format(
+                    len(self.lazy_entries),
+                    self.lazy_loaded_count(),
+                )
+            )
+            return added
+
         self.lazy_generation += 1
         self.lazy_load_queue = deque()
         self.lazy_warning_backlog = []
@@ -2057,6 +2334,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.populate_tables()
         self.clear()
         self.status_label.setText("{:,} files indexed, 0 loaded".format(len(self.lazy_entries)))
+        return len(self.lazy_entries)
 
     def lazy_loaded_count(self):
         return self.lazy_loaded_total
@@ -2350,7 +2628,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if filenames:
             self.load_files(filenames, add=False)
 
-    def populate_tables(self):
+    def populate_tables(self, selected_lazy_paths=None):
         visible = self.visible_selector_panes()
         names = self.tab_list.getDisplayTabNames() if not self.lazy_entries else []
         self.lazy_item_widgets = {}
@@ -2386,7 +2664,26 @@ class MainWindow(QtWidgets.QMainWindow):
                     item = QtWidgets.QListWidgetItem("{}  ({})".format(names[i], tab.shapestring))
                     item.setData(QtCore.Qt.UserRole, ("table", i))
                     pane.table_list_widget.addItem(item)
-            if pane.table_list_widget.count() > 0:
+            restored_selection = False
+            if self.lazy_entries and selected_lazy_paths is not None:
+                paths = (
+                    selected_lazy_paths[pane_index]
+                    if pane_index < len(selected_lazy_paths)
+                    else set()
+                )
+                for row in range(pane.table_list_widget.count()):
+                    item = pane.table_list_widget.item(row)
+                    data = item.data(QtCore.Qt.UserRole)
+                    if (
+                        isinstance(data, tuple)
+                        and data[0] == "lazy"
+                        and self.normalized_file_path(
+                            self.lazy_entries[data[1]].path
+                        ) in paths
+                    ):
+                        item.setSelected(True)
+                        restored_selection = True
+            if pane.table_list_widget.count() > 0 and not restored_selection:
                 default_row = min(pane_index, pane.table_list_widget.count() - 1)
                 pane.table_list_widget.item(default_row).setSelected(True)
             pane.table_list_widget.blockSignals(False)
@@ -2796,8 +3093,15 @@ class MainWindow(QtWidgets.QMainWindow):
         if plot_type == "PDF":
             pd.toPDF(nBins=101, smooth=False)
         elif plot_type == "FFT":
-            pd.toFFT(yType="PSD", xType="1/x", avgMethod="Welch", avgWindow="Hamming",
-                     bDetrend=True, nExp=11, nPerDecade=20)
+            pd.toFFT(
+                yType=self.fft_output_combo.currentText(),
+                xType=self.fft_x_combo.currentData(),
+                avgMethod=self.fft_averaging_combo.currentText(),
+                avgWindow=self.fft_window_combo.currentText(),
+                bDetrend=self.fft_detrend_check.isChecked(),
+                nExp=self.fft_nexp_spin.value(),
+                nPerDecade=self.fft_bins_spin.value(),
+            )
         elif plot_type == "MinMax":
             pd.toMinMax(xScale=False, yScale=True, yCenter="None")
 
@@ -3147,43 +3451,92 @@ class MainWindow(QtWidgets.QMainWindow):
             lines.append("")
         self.info_text.setPlainText("\n".join(lines))
 
+    def selected_del_slopes(self):
+        return [
+            slope for slope, action in self.del_slope_actions.items()
+            if action.isChecked()
+        ]
+
+    def update_del_slopes_button(self):
+        slopes = self.selected_del_slopes()
+        self.del_slopes_button.setText(
+            "m = {}".format(", ".join(map(str, slopes))) if slopes else "None"
+        )
+        self.del_slopes_button.setToolTip(
+            "Select one or more Wöhler slopes for 1 Hz damage-equivalent loads"
+        )
+
+    def on_del_slopes_changed(self, _checked=False):
+        slopes = self.selected_del_slopes()
+        self.settings.setValue("stats/del_slopes", [str(slope) for slope in slopes])
+        self.update_del_slopes_button()
+        self.update_stats()
+
+    @staticmethod
+    def _stats_table_item(value, numeric=False):
+        if numeric:
+            if isinstance(value, (int, np.integer)):
+                text = "{:,}".format(int(value))
+            else:
+                try:
+                    value = float(value)
+                    text = "{:.6g}".format(value) if np.isfinite(value) else "N/A"
+                except (TypeError, ValueError):
+                    text = "N/A"
+        else:
+            text = str(value)
+        item = QtWidgets.QTableWidgetItem(text)
+        if numeric:
+            item.setTextAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
+        return item
+
     def update_stats(self):
+        slopes = self.selected_del_slopes()
+        headers = ["Series", "File", "n", "Min", "Mean", "Max", "Std"]
+        headers.extend("DEL m={} (1 Hz)".format(slope) for slope in slopes)
+        self.stats_table.setSortingEnabled(False)
+        self.stats_table.clear()
+        self.stats_table.setColumnCount(len(headers))
+        self.stats_table.setHorizontalHeaderLabels(headers)
         if not self.plot_data:
-            self.stats_text.clear()
+            self.stats_table.setRowCount(0)
             return
-        lines = []
-        regular_plot = self.plot_type_combo.currentText() == "Regular"
+
+        rows = []
         for pd in self.plot_data:
-            if regular_plot and not pd.yIsString and not pd.yIsDate:
-                n = pd.n0()[0]
-                y_min = pd.y0Min()[0]
-                y_mean = pd.y0Mean()[0]
-                y_max = pd.y0Max()[0]
-                y_std = pd.y0Std()[0]
-                if n == 0:
-                    continue
-                lines.append(pd.syl or pd.sy)
-                lines.append("  n    = {:,}".format(n))
-                lines.append("  min  = {:.6g}".format(y_min))
-                lines.append("  mean = {:.6g}".format(y_mean))
-                lines.append("  max  = {:.6g}".format(y_max))
-                lines.append("  std  = {:.6g}".format(y_std))
-                lines.append("")
-                continue
             try:
-                _, y = _finite_xy(pd.x, pd.y)
+                x_raw, y_raw = _finite_xy(pd.x0, pd.y0)
             except Exception:
                 continue
-            if len(y) == 0:
+            if len(y_raw) == 0:
                 continue
-            lines.append(pd.syl or pd.sy)
-            lines.append("  n    = {:,}".format(len(y)))
-            lines.append("  min  = {:.6g}".format(np.nanmin(y)))
-            lines.append("  mean = {:.6g}".format(np.nanmean(y)))
-            lines.append("  max  = {:.6g}".format(np.nanmax(y)))
-            lines.append("  std  = {:.6g}".format(np.nanstd(y)))
-            lines.append("")
-        self.stats_text.setPlainText("\n".join(lines))
+            del_values = _equivalent_loads(x_raw, y_raw, slopes)
+            rows.append([
+                pd.syl or pd.sy,
+                os.path.basename(getattr(pd, "filename", "") or getattr(pd, "st", "")),
+                len(y_raw),
+                np.min(y_raw),
+                np.mean(y_raw),
+                np.max(y_raw),
+                np.std(y_raw),
+                *[del_values[slope] for slope in slopes],
+            ])
+
+        self.stats_table.setRowCount(len(rows))
+        for row_index, row_values in enumerate(rows):
+            for column_index, value in enumerate(row_values):
+                item = self._stats_table_item(value, numeric=column_index >= 2)
+                if column_index == 1:
+                    item.setToolTip(str(value))
+                self.stats_table.setItem(row_index, column_index, item)
+        header = self.stats_table.horizontalHeader()
+        header.setSectionResizeMode(QtWidgets.QHeaderView.ResizeToContents)
+        if headers:
+            header.setSectionResizeMode(0, QtWidgets.QHeaderView.Stretch)
+        if len(headers) > 1:
+            header.setSectionResizeMode(1, QtWidgets.QHeaderView.Interactive)
+            header.resizeSection(1, 150)
+        self.stats_table.resizeRowsToContents()
 
     def export_plot_image(self):
         if not self.canvas._plots:

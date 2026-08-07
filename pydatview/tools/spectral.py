@@ -53,14 +53,18 @@ def fft_wrap(t,y,dt=None, output_type='amplitude',averaging='None',averaging_win
     n0 = len(y) 
     if len(t)!=len(y):
         raise Exception('t and y should have the same length')
-    # Removing times that are NaN
-    t_NaN = np.isnan(t)
-    t = t[~t_NaN]
-    y = y[~t_NaN]
-    nt = len(t) 
-    # Removing signal that is NaN
-    y = y[~np.isnan(y)]
-    n = len(y) 
+    # Remove invalid time/signal pairs together to preserve sample alignment.
+    if t.dtype.kind == 'M':
+        valid_time = ~np.isnat(t)
+    else:
+        valid_time = np.isfinite(t)
+    valid = valid_time & np.isfinite(y)
+    t = t[valid]
+    y = y[valid]
+    nt = len(t)
+    n = len(y)
+    if n < 2:
+        raise Exception('FFT requires at least two finite samples')
 
     if dt is None:
         dtDelta0 = t[1]-t[0]
@@ -71,6 +75,8 @@ def fft_wrap(t,y,dt=None, output_type='amplitude',averaging='None',averaging_win
         if relDiff>0.01:
             #if verbose:
             print('[WARN] dt from tmax-tmin different from dt from t2-t1 {} {}'.format(dt, dtDelta0) )
+    if not np.isfinite(dt) or dt <= 0:
+        raise Exception('FFT requires a positive sample interval')
     Fs = 1/dt
     if averaging =='none':
         frq, PSD, Info = psd(y, fs=Fs, detrend=detrend, return_onesided=True)

@@ -271,7 +271,7 @@ class PlotData():
            avgWindow : Hamming, Hann, Rectangular
         see module spectral for more
 
-        NOTE: inplace (modifies itself), does not return a new instance
+        NOTE: inplace (modifies itself), returns the FFT metadata
         """
         from pydatview.tools.spectral import fft_wrap
 
@@ -291,7 +291,8 @@ class PlotData():
         PD.xIsDate=False
         # y label
         if yType=='PSD':
-            PD.sy= 'PSD({}) [({})^2/{}]'.format(no_unit(PD.sy), unit(PD.sy), unit(PD.sx))
+            frequency_unit = 'Hz' if unit(PD.sx)=='s' else '1/{}'.format(unit(PD.sx))
+            PD.sy= 'PSD({}) [({})^2/{}]'.format(no_unit(PD.sy), unit(PD.sy), frequency_unit)
         elif yType=='f x PSD':
             PD.sy= 'f-weighted PSD({}) [({})^2]'.format(no_unit(PD.sy), unit(PD.sy))
         elif yType=='Amplitude':
@@ -305,7 +306,12 @@ class PlotData():
             else:
                 PD.sx= ''
         elif xType=='x':
-            PD.x=1/PD.x
+            nonzero = np.isfinite(PD.x) & (PD.x != 0)
+            PD.x = 1 / PD.x[nonzero]
+            PD.y = PD.y[nonzero]
+            order = np.argsort(PD.x)
+            PD.x = PD.x[order]
+            PD.y = PD.y[order]
             if unit(PD.sx)=='s':
                 PD.sx= 'Period [s]'
             else:

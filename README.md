@@ -137,6 +137,22 @@ for calculations, unit conversion, table preview, or table export.
 
 Formats without lightweight channel headers use the normal full-file loader.
 
+Enable **Keep files from previous scans** in the scan dialog to append new
+matches to the current index. Existing loaded data, cached variables, and the
+current file selection are retained; duplicate paths are ignored.
+
+## Statistics and FFT
+
+The **Stats** tab shows one row per plotted time series. Use the **DEL slopes**
+menu to add one or more 1 Hz damage-equivalent-load columns for Wohler slopes
+from 2 through 13.
+
+Selecting **FFT** opens spectrum controls for PSD, frequency-weighted PSD, or
+amplitude; averaging and window selection; Welch segment length or logarithmic
+binning resolution; frequency, cyclic-frequency, or period axes; and
+detrending. FFT plots enable the base-10 logarithmic Y axis by default and
+restore the previous Y-axis mode when returning to a regular plot.
+
 ## Tests
 
 Run the core and plugin tests:
