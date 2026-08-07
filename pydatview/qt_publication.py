@@ -40,6 +40,7 @@ class PublicationExportOptions:
     tex_system: str = "pdflatex"
     x_label: str = ""
     y_label: str = ""
+    legend_labels: tuple = ()
 
     @property
     def extension(self):
@@ -216,7 +217,13 @@ def export_publication_plot(
                     _PLOT_PALETTE[curve_index % len(_PLOT_PALETTE)],
                     dtype=float,
                 ) / 255.0
-                label = pd.syl or pd.sy
+                label = "Set {}".format(curve_index + 1)
+                if curve_index < len(options.legend_labels):
+                    custom_label = str(
+                        options.legend_labels[curve_index]
+                    ).strip()
+                    if custom_label:
+                        label = custom_label
                 if options.use_tex:
                     label = _tex_escape(label)
                 markevery = max(1, len(x) // 2000) if marker else None
@@ -453,6 +460,50 @@ class PublicationExportDialog(QtWidgets.QDialog):
         options_row.addStretch(1)
         root.addLayout(options_row)
 
+        legend_sources = list(initial.get("legend_sources", []))
+        legend_labels = list(initial.get("legend_labels", []))
+        legend_count = max(len(legend_sources), len(legend_labels))
+        self.legend_table = QtWidgets.QTableWidget(legend_count, 2)
+        self.legend_table.setHorizontalHeaderLabels([
+            "Curve", "Legend label"
+        ])
+        self.legend_table.verticalHeader().setVisible(False)
+        self.legend_table.setSelectionBehavior(
+            QtWidgets.QAbstractItemView.SelectRows
+        )
+        self.legend_table.setAlternatingRowColors(True)
+        self.legend_table.setMinimumHeight(90)
+        self.legend_table.setMaximumHeight(190)
+        header = self.legend_table.horizontalHeader()
+        header.setSectionResizeMode(
+            0, QtWidgets.QHeaderView.ResizeToContents
+        )
+        header.setSectionResizeMode(1, QtWidgets.QHeaderView.Stretch)
+        for index in range(legend_count):
+            source = (
+                str(legend_sources[index])
+                if index < len(legend_sources) else ""
+            )
+            label = (
+                str(legend_labels[index])
+                if index < len(legend_labels)
+                else "Set {}".format(index + 1)
+            )
+            curve_item = QtWidgets.QTableWidgetItem(
+                "Set {}".format(index + 1)
+            )
+            curve_item.setFlags(
+                curve_item.flags() & ~QtCore.Qt.ItemIsEditable
+            )
+            curve_item.setToolTip(source)
+            label_item = QtWidgets.QTableWidgetItem(label)
+            label_item.setToolTip(source)
+            self.legend_table.setItem(index, 0, curve_item)
+            self.legend_table.setItem(index, 1, label_item)
+        root.addWidget(QtWidgets.QLabel("LEGEND LABELS"))
+        root.addWidget(self.legend_table)
+        self.legend_table.setEnabled(self.legend_check.isChecked())
+
         buttons = QtWidgets.QDialogButtonBox(
             QtWidgets.QDialogButtonBox.Cancel
         )
@@ -468,6 +519,7 @@ class PublicationExportDialog(QtWidgets.QDialog):
         self.width_spin.valueChanged.connect(self.set_custom_preset)
         self.height_spin.valueChanged.connect(self.set_custom_preset)
         self.use_tex_check.toggled.connect(self.update_tex_controls)
+        self.legend_check.toggled.connect(self.legend_table.setEnabled)
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         self.on_format_changed()
@@ -535,6 +587,10 @@ class PublicationExportDialog(QtWidgets.QDialog):
         extension = self.current_extension()
         if os.path.splitext(path)[1].lower() != "." + extension:
             path = os.path.splitext(path)[0] + "." + extension
+        legend_labels = tuple(
+            self.legend_table.item(row, 1).text()
+            for row in range(self.legend_table.rowCount())
+        )
         return PublicationExportOptions(
             path=path,
             width=self.width_spin.value(),
@@ -551,6 +607,7 @@ class PublicationExportDialog(QtWidgets.QDialog):
             tex_system=self.tex_system_combo.currentText(),
             x_label=self.x_label_edit.text(),
             y_label=self.y_label_edit.text(),
+            legend_labels=legend_labels,
         )
 
     def accept(self):

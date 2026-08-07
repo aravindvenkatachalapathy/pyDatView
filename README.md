@@ -189,7 +189,9 @@ with Matplotlib without changing the interactive PyQtGraph view. Available
 formats are vector PDF and SVG, LaTeX PGF, and PNG or TIFF up to 1200 DPI.
 The dialog controls physical figure dimensions, typography, line width,
 peak-preserving vector point limits, grid, legend, transparency, and editable
-X-axis and Y-axis labels.
+X-axis and Y-axis labels. Export legends use compact `Set 1`, `Set 2`
+labels by default; each label can be renamed in the dialog before export.
+Original source names remain available as tooltips in the legend-label table.
 
 PGF and the optional **Use LaTeX text** setting require a LaTeX distribution
 on the exporting machine. PDF and SVG remain publication-quality vector

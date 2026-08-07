@@ -451,6 +451,14 @@ class QtToolsStatsMixin:
                         getattr(pd, "sy", "") for pd in self.plot_data
                     )))
                 ),
+                "legend_sources": [
+                    getattr(pd, "syl", "") or getattr(pd, "sy", "")
+                    for pd in self.plot_data
+                ],
+                "legend_labels": [
+                    "Set {}".format(index + 1)
+                    for index in range(len(self.plot_data))
+                ],
             },
             settings=self.settings,
             parent=self,

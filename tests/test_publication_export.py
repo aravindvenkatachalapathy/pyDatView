@@ -84,6 +84,8 @@ class TestPublicationExport(unittest.TestCase):
                         max_points=1000,
                         x_label="Elapsed time [s]",
                         y_label="Rotor load [kN]",
+                        legend=True,
+                        legend_labels=("Baseline", "Controlled"),
                     ),
                 )
                 self.assertGreater(os.path.getsize(path), 1000)
@@ -92,6 +94,70 @@ class TestPublicationExport(unittest.TestCase):
                         content = exported.read()
                     self.assertIn("Elapsed time [s]", content)
                     self.assertIn("Rotor load [kN]", content)
+                    self.assertIn("Baseline", content)
+                    self.assertIn("Controlled", content)
+                    self.assertNotIn("case_01", content)
+
+    def test_export_legend_defaults_to_compact_set_names(self):
+        from pydatview.qt_publication import (
+            PublicationExportOptions,
+            export_publication_plot,
+        )
+
+        x = np.arange(4, dtype=float)
+        plot_data = [
+            SimpleNamespace(
+                x=x,
+                y=x,
+                sx="Time [s]",
+                sy="Load [N]",
+                syl="/very/long/path/case_01.out | Load [N]",
+            ),
+            SimpleNamespace(
+                x=x,
+                y=x + 1,
+                sx="Time [s]",
+                sy="Load [N]",
+                syl="/very/long/path/case_02.out | Load [N]",
+            ),
+        ]
+        with tempfile.TemporaryDirectory() as folder:
+            path = os.path.join(folder, "legend.svg")
+            export_publication_plot(
+                plot_data,
+                PublicationExportOptions(path=path, legend=True),
+            )
+            with open(path, encoding="utf-8") as exported:
+                content = exported.read()
+
+        self.assertIn("Set 1", content)
+        self.assertIn("Set 2", content)
+        self.assertNotIn("/very/long/path", content)
+
+    def test_dialog_allows_legend_label_renaming(self):
+        from pydatview.qt_compat import QtWidgets
+        from pydatview.qt_publication import PublicationExportDialog
+
+        app = (
+            QtWidgets.QApplication.instance()
+            or QtWidgets.QApplication([])
+        )
+        dialog = PublicationExportDialog(initial={
+            "legend": True,
+            "legend_sources": ["/simulations/case_01.out"],
+            "legend_labels": ["Set 1"],
+        })
+        dialog.legend_table.item(0, 1).setText("Baseline")
+
+        self.assertEqual(
+            dialog.options().legend_labels, ("Baseline",)
+        )
+        self.assertEqual(
+            dialog.legend_table.item(0, 0).toolTip(),
+            "/simulations/case_01.out",
+        )
+        dialog.close()
+        app.processEvents()
 
 
 if __name__ == "__main__":
