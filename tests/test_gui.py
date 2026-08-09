@@ -478,6 +478,67 @@ class TestGUI(unittest.TestCase):
         window.close()
         self.app.processEvents()
 
+    def test_scanned_multi_table_file_plots_only_selected_dataset(self):
+        from pydatview.Tables import Table
+        from pydatview.qt_main import LazyFileEntry, MainWindow
+
+        window = MainWindow()
+        path = os.path.abspath("wind.bts")
+        tables = [
+            Table(
+                data=pd.DataFrame({"z_[m]": [10.0, 20.0], "u_[m/s]": [8.0, 9.0]}),
+                name="VertProfile",
+                filename=path,
+            ),
+            Table(
+                data=pd.DataFrame({"t_[s]": [0.0, 0.25], "u_[m/s]": [7.0, 10.0]}),
+                name="ZMidLine",
+                filename=path,
+            ),
+            Table(
+                data=pd.DataFrame({"y_[m]": [-1.0, 1.0], "rho_uu_[-]": [0.5, 1.0]}),
+                name="Mid_xcorr_y",
+                filename=path,
+            ),
+        ]
+        window.tab_list.append(tables)
+        window.lazy_entries = [LazyFileEntry(
+            path=path,
+            file_format=SimpleNamespace(name="TurbSim binary"),
+            table_indices=[0, 1, 2],
+            full_loaded=True,
+        )]
+        window.populate_tables()
+
+        pane = window.selector_panes[0]
+        self.assertEqual(pane.bladed_dataset_label.text(), "DATASET")
+        self.assertEqual(pane.bladed_dataset_combo.currentText(), "ZMidLine")
+        pane.y_list_widget.clearSelection()
+        for row in range(pane.y_list_widget.count()):
+            item = pane.y_list_widget.item(row)
+            if item.text() == "u_[m/s]":
+                item.setSelected(True)
+        plot_data = window.build_plot_data()
+        self.assertEqual(len(plot_data), 1)
+        np.testing.assert_allclose(plot_data[0].x, [0.0, 0.25])
+        np.testing.assert_allclose(plot_data[0].y, [7.0, 10.0])
+
+        pane.bladed_dataset_combo.setCurrentIndex(
+            pane.bladed_dataset_combo.findData("VertProfile")
+        )
+        pane.y_list_widget.clearSelection()
+        for row in range(pane.y_list_widget.count()):
+            item = pane.y_list_widget.item(row)
+            if item.text() == "u_[m/s]":
+                item.setSelected(True)
+        plot_data = window.build_plot_data()
+        self.assertEqual(len(plot_data), 1)
+        np.testing.assert_allclose(plot_data[0].x, [10.0, 20.0])
+        np.testing.assert_allclose(plot_data[0].y, [8.0, 9.0])
+
+        window.close()
+        self.app.processEvents()
+
     def test_scan_append_keeps_loaded_entries_and_selection(self):
         from pydatview.Tables import Table
         from pydatview.qt_main import MainWindow

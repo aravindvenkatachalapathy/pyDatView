@@ -893,6 +893,12 @@ class QtLoadingMixin:
                         continue
                     if entry.loaded:
                         for table_index in entry.table_indices:
+                            if (
+                                getattr(p, "dataset_mode", None) == "lazy"
+                                and self.tab_list[table_index].nickname
+                                != p.bladed_dataset_combo.currentData()
+                            ):
+                                continue
                             if table_index not in seen:
                                 indices.append(table_index)
                                 seen.add(table_index)
@@ -912,5 +918,4 @@ class QtLoadingMixin:
         self.update_table_preview()
         self.update_file_info()
         self.on_selection_changed()
-
 

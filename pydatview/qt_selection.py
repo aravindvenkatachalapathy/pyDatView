@@ -19,9 +19,24 @@ class QtSelectionPlotMixin:
             if group not in groups:
                 groups.append(group)
 
+        lazy_indices = self.selected_lazy_indices(pane)
+        lazy_datasets = []
+        has_lazy_multi_table = False
+        if not groups:
+            for lazy_index in lazy_indices:
+                entry = self.lazy_entries[lazy_index]
+                if len(entry.table_indices) > 1:
+                    has_lazy_multi_table = True
+                for table_index in entry.table_indices:
+                    dataset = self.tab_list[table_index].nickname
+                    if dataset not in lazy_datasets:
+                        lazy_datasets.append(dataset)
+
         pane.bladed_dataset_combo.blockSignals(True)
         pane.bladed_dataset_combo.clear()
         if groups:
+            pane.dataset_mode = "bladed"
+            pane.bladed_dataset_label.setText("BLADED VARIABLE GROUP")
             pane.bladed_dataset_combo.addItem("All variable groups", "__all__")
             for group in groups:
                 pane.bladed_dataset_combo.addItem(group, group)
@@ -29,7 +44,28 @@ class QtSelectionPlotMixin:
             pane.bladed_dataset_combo.setCurrentIndex(
                 pane.bladed_dataset_combo.findData(selected_group)
             )
-        visible = bool(groups)
+        elif has_lazy_multi_table and lazy_datasets:
+            pane.dataset_mode = "lazy"
+            pane.bladed_dataset_label.setText("DATASET")
+            for dataset in lazy_datasets:
+                pane.bladed_dataset_combo.addItem(dataset, dataset)
+            if previous_group in lazy_datasets:
+                selected_dataset = previous_group
+            else:
+                selected_dataset = next(
+                    (
+                        preferred
+                        for preferred in ("ZMidLine", "TSHubLine")
+                        if preferred in lazy_datasets
+                    ),
+                    lazy_datasets[0],
+                )
+            pane.bladed_dataset_combo.setCurrentIndex(
+                pane.bladed_dataset_combo.findData(selected_dataset)
+            )
+        else:
+            pane.dataset_mode = None
+        visible = bool(groups) or (has_lazy_multi_table and bool(lazy_datasets))
         pane.bladed_dataset_label.setVisible(visible)
         pane.bladed_dataset_combo.setVisible(visible)
         pane.bladed_dataset_combo.blockSignals(False)
@@ -97,7 +133,23 @@ class QtSelectionPlotMixin:
             if previous_x_name in all_names:
                 x_to_select = all_columns[all_names.index(previous_x_name)][0]
             else:
-                x_to_select = next((i for i, col in all_columns if col.lower().startswith("time")), all_columns[0][0])
+                x_to_select = next(
+                    (
+                        i
+                        for i, col in all_columns
+                        if col.lower().startswith("time")
+                        or col.lower() == "t"
+                        or col.lower().startswith("t_[")
+                    ),
+                    next(
+                        (
+                            i
+                            for i, col in all_columns
+                            if not col.lower().startswith("index")
+                        ),
+                        all_columns[0][0],
+                    ),
+                )
             pane.x_combo.setCurrentIndex(
                 next(
                     row for row in range(pane.x_combo.count())
@@ -211,6 +263,12 @@ class QtSelectionPlotMixin:
                 for lazy_index in lazy_indices:
                     entry = self.lazy_entries[lazy_index]
                     for table_index in entry.table_indices:
+                        if (
+                            getattr(pane, "dataset_mode", None) == "lazy"
+                            and self.tab_list[table_index].nickname
+                            != pane.bladed_dataset_combo.currentData()
+                        ):
+                            continue
                         table_sources.append((table_index, entry))
             else:
                 table_sources = [
@@ -473,5 +531,3 @@ class QtSelectionPlotMixin:
         pane.table_list_widget.blockSignals(False)
         self.update_table_preview()
         self.update_file_info()
-
-

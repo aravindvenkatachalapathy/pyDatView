@@ -47,6 +47,7 @@ class SelectorPane:
     y_list_widget: object
     display_columns: list = field(default_factory=list)
     bladed_project_mode: bool = False
+    dataset_mode: str = None
 
 
 class LazyLoadWorker(QtCore.QObject):
@@ -342,4 +343,3 @@ def _default_lazy_workers():
     if sys.platform.startswith("win"):
         return min(cpu_count, 8)
     return min(cpu_count, 32)
-
