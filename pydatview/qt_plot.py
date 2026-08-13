@@ -1,5 +1,7 @@
 """PyQtGraph canvas and plot styling for the Qt GUI."""
 
+import html
+
 import numpy as np
 
 from pydatview.plotdata import PDL_xlabel
@@ -72,6 +74,7 @@ class NumericAxisItem(pg.AxisItem):
 class QtPlotCanvas(pg.GraphicsLayoutWidget):
     curveSelected = QtCore.Signal(object)
     hoverCoordinates = QtCore.Signal(object)
+    measurementMarkerChanged = QtCore.Signal(object)
 
     def __init__(self, parent=None):
         super().__init__(parent=parent)
@@ -83,20 +86,29 @@ class QtPlotCanvas(pg.GraphicsLayoutWidget):
         self.viewport().setMouseTracking(True)
         self._plots = []
         self._curve_items = []
+        self._curve_records = []
         self._selected_curve = None
         self._zoom_mode = False
         self._logx = False
         self._logy = False
+        self._measurement_marker_enabled = False
+        self._measurement_marker_x = None
+        self._measurement_items = []
+        self.measurement_values = []
         self._mouse_proxy = pg.SignalProxy(
             self.scene().sigMouseMoved,
             rateLimit=60,
             slot=self._on_mouse_moved,
         )
+        self.scene().sigMouseClicked.connect(self._on_mouse_clicked)
 
     def clear_plot(self):
         self.clear()
         self._plots = []
         self._curve_items = []
+        self._curve_records = []
+        self._measurement_items = []
+        self.measurement_values = []
         self._selected_curve = None
         self.hoverCoordinates.emit(None)
 
@@ -105,6 +117,22 @@ class QtPlotCanvas(pg.GraphicsLayoutWidget):
         mouse_mode = pg.ViewBox.RectMode if enabled else pg.ViewBox.PanMode
         for plot in self._plots:
             plot.getViewBox().setMouseMode(mouse_mode)
+
+    def set_measurement_marker_enabled(self, enabled):
+        self._measurement_marker_enabled = bool(enabled)
+        if not enabled:
+            self.clear_measurement_marker()
+
+    def clear_measurement_marker(self):
+        for plot, item in self._measurement_items:
+            try:
+                plot.removeItem(item)
+            except (RuntimeError, ValueError):
+                pass
+        self._measurement_items = []
+        self._measurement_marker_x = None
+        self.measurement_values = []
+        self.measurementMarkerChanged.emit([])
 
     @staticmethod
     def _display_axis_value(value, logarithmic):
@@ -131,6 +159,22 @@ class QtPlotCanvas(pg.GraphicsLayoutWidget):
     def _on_mouse_moved(self, event):
         scene_position = event[0] if isinstance(event, (tuple, list)) else event
         self.hoverCoordinates.emit(self.coordinates_at(scene_position))
+
+    def _on_mouse_clicked(self, event):
+        if not self._measurement_marker_enabled or self._zoom_mode:
+            return
+        if event.button() != QtCore.Qt.LeftButton:
+            return
+        scene_position = event.scenePos()
+        for plot in self._plots:
+            # Include the bottom axis as well as the plotting rectangle.
+            if not plot.sceneBoundingRect().contains(scene_position):
+                continue
+            view_point = plot.getViewBox().mapSceneToView(scene_position)
+            x = self._display_axis_value(view_point.x(), self._logx)
+            if np.isfinite(x):
+                self.set_measurement_marker(x)
+            return
 
     def leaveEvent(self, event):
         self.hoverCoordinates.emit(None)
@@ -217,6 +261,13 @@ class QtPlotCanvas(pg.GraphicsLayoutWidget):
                 }
                 item.sigClicked.connect(lambda clicked_item, _ev, meta=meta: self.select_curve(clicked_item, meta))
                 self._curve_items.append((item, base_pen, meta))
+                self._curve_records.append({
+                    "plot_index": i_group,
+                    # Marker annotations deliberately omit the simulation/file label.
+                    "label": pd.sy,
+                    "x": np.asarray(x),
+                    "y": np.asarray(y),
+                })
                 curve_idx += 1
 
             if logx or logy:
@@ -227,6 +278,132 @@ class QtPlotCanvas(pg.GraphicsLayoutWidget):
                 logx=logx,
                 logy=logy,
             )
+
+        if self._measurement_marker_enabled and self._measurement_marker_x is not None:
+            self.set_measurement_marker(self._measurement_marker_x)
+
+    @staticmethod
+    def _interpolate_curve(x, y, marker_x):
+        if len(x) == 0:
+            return None
+        finite = np.isfinite(x) & np.isfinite(y)
+        x = np.asarray(x[finite], dtype=float)
+        y = np.asarray(y[finite], dtype=float)
+        if len(x) == 0 or marker_x < np.min(x) or marker_x > np.max(x):
+            return None
+        order = np.argsort(x, kind="stable")
+        x = x[order]
+        y = y[order]
+        x, unique_indices = np.unique(x, return_index=True)
+        y = y[unique_indices]
+        if len(x) == 1:
+            return float(y[0]) if marker_x == x[0] else None
+        return float(np.interp(marker_x, x, y))
+
+    @staticmethod
+    def _marker_number(value):
+        return "{:.7g}".format(float(value))
+
+    def set_measurement_marker(self, x):
+        """Place a vertical marker and show every curve value at *x*."""
+        if not self._measurement_marker_enabled:
+            return
+        x = float(x)
+        if not np.isfinite(x) or (self._logx and x <= 0):
+            return
+        for plot, item in self._measurement_items:
+            try:
+                plot.removeItem(item)
+            except (RuntimeError, ValueError):
+                pass
+        self._measurement_items = []
+        self._measurement_marker_x = x
+        self.measurement_values = []
+
+        display_x = np.log10(x) if self._logx else x
+        values_by_plot = {index: [] for index in range(len(self._plots))}
+        for record in self._curve_records:
+            value = self._interpolate_curve(record["x"], record["y"], x)
+            if value is None or (self._logy and value <= 0):
+                continue
+            result = {
+                "plot_index": record["plot_index"],
+                "label": record["label"],
+                "x": x,
+                "y": value,
+            }
+            self.measurement_values.append(result)
+            values_by_plot[record["plot_index"]].append(result)
+
+        for plot_index, plot in enumerate(self._plots):
+            line = pg.InfiniteLine(
+                pos=display_x,
+                angle=90,
+                movable=False,
+                pen=pg.mkPen((198, 40, 40), width=1.5, style=QtCore.Qt.DashLine),
+            )
+            line.setZValue(20)
+            plot.addItem(line, ignoreBounds=True)
+            self._measurement_items.append((plot, line))
+
+            plot_values = values_by_plot[plot_index]
+            if plot_values:
+                spots = []
+                for result in plot_values:
+                    display_y = np.log10(result["y"]) if self._logy else result["y"]
+                    spots.append({
+                        "pos": (display_x, display_y),
+                        "size": 8,
+                        "brush": pg.mkBrush(198, 40, 40),
+                        "pen": pg.mkPen("w", width=1),
+                    })
+                scatter = pg.ScatterPlotItem(spots=spots)
+                scatter.setZValue(21)
+                plot.addItem(scatter)
+                self._measurement_items.append((plot, scatter))
+
+            marker_font = QtGui.QFont(QtWidgets.QApplication.font())
+            marker_font.setPointSize(max(7, marker_font.pointSize() - 2))
+            x_range, y_range = plot.getViewBox().viewRange()
+            x_span = x_range[1] - x_range[0]
+            y_span = y_range[1] - y_range[0]
+            label_x = display_x + 0.015 * x_span
+            anchor_x = 0
+            if display_x > x_range[0] + 0.65 * x_span:
+                anchor_x = 1
+                label_x = display_x - 0.015 * x_span
+
+            x_label = pg.TextItem(
+                html='<span style="color:#c62828;"><b>x = {}</b></span>'.format(
+                    self._marker_number(x)
+                ),
+                anchor=(anchor_x, 0),
+                fill=pg.mkBrush(255, 255, 255, 225),
+                border=pg.mkPen(198, 40, 40),
+            )
+            x_label.setFont(marker_font)
+            x_label.setPos(label_x, y_range[1] - 0.025 * y_span)
+            x_label.setZValue(22)
+            plot.addItem(x_label, ignoreBounds=True)
+            self._measurement_items.append((plot, x_label))
+
+            for result in plot_values:
+                display_y = np.log10(result["y"]) if self._logy else result["y"]
+                value_label = pg.TextItem(
+                    html='<span style="color:#c62828;">{}: y = {}</span>'.format(
+                        html.escape(str(result["label"])),
+                        self._marker_number(result["y"]),
+                    ),
+                    anchor=(anchor_x, 0.5),
+                    fill=pg.mkBrush(255, 255, 255, 215),
+                )
+                value_label.setFont(marker_font)
+                value_label.setPos(label_x, display_y)
+                value_label.setZValue(22)
+                plot.addItem(value_label, ignoreBounds=True)
+                self._measurement_items.append((plot, value_label))
+
+        self.measurementMarkerChanged.emit(list(self.measurement_values))
 
     @staticmethod
     def _limited_range(current_range, minimum, maximum, logarithmic, axis):

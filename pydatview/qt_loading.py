@@ -4,7 +4,7 @@ import os
 import time
 from collections import deque
 
-from pydatview.qt_compat import QtCore, QtWidgets
+from pydatview.qt_compat import QtCore, QtGui, QtWidgets
 from pydatview.qt_dialogs import ScanDialog
 from pydatview.qt_io import (
     LazyFileEntry,
@@ -56,6 +56,7 @@ class QtLoadingMixin:
             self.logx_check,
             self.logy_check,
             self.legend_check,
+            self.measurement_marker_check,
             self.line_width_spin,
             self.marker_combo,
             self.axis_limits_button,
@@ -67,6 +68,8 @@ class QtLoadingMixin:
             self.select_none_y_button,
             self.load_selected_button,
             self.math_button,
+            self.copy_stats_button,
+            self.export_stats_button,
             self.fft_options_panel,
             self.comparison_options_panel,
         ):
@@ -703,6 +706,243 @@ class QtLoadingMixin:
         self.finish_lazy_load_batch_if_done()
         self.on_table_selection_changed()
 
+    def show_table_context_menu(self, pane, position):
+        item = pane.table_list_widget.itemAt(position)
+        if item is None:
+            return
+        if not item.isSelected():
+            pane.table_list_widget.clearSelection()
+            item.setSelected(True)
+            pane.table_list_widget.setCurrentItem(item)
+        self.active_selector_pane = pane
+
+        menu = QtWidgets.QMenu(pane.table_list_widget)
+        remove_action = menu.addAction("Remove from pyDatView")
+        reload_action = menu.addAction("Reload")
+        location_action = menu.addAction("Open file location")
+        paths = self.selected_source_paths(pane)
+        reload_action.setEnabled(bool(paths))
+        location_action.setEnabled(any(os.path.exists(path) for path in paths))
+        chosen = menu.exec(pane.table_list_widget.mapToGlobal(position))
+        if chosen is remove_action:
+            self.remove_selected_sources(pane)
+        elif chosen is reload_action:
+            self.reload_selected_sources(pane)
+        elif chosen is location_action:
+            self.open_selected_file_locations(pane)
+
+    def selected_source_paths(self, pane=None):
+        pane = pane or self.active_selector_pane or self.selector_panes[0]
+        paths = []
+        seen = set()
+        for item in pane.table_list_widget.selectedItems():
+            data = item.data(QtCore.Qt.UserRole)
+            path = ""
+            if isinstance(data, tuple) and data[0] == "lazy":
+                path = self.lazy_entries[data[1]].path
+            elif isinstance(data, tuple) and data[0] == "bladed_project":
+                path = data[1]
+            elif isinstance(data, tuple) and data[0] == "table":
+                path = self.tab_list[data[1]].filename
+            if path:
+                normalized = self.normalized_file_path(path)
+                if normalized not in seen:
+                    paths.append(path)
+                    seen.add(normalized)
+        return paths
+
+    def _delete_table_indices(self, indices):
+        indices = set(indices)
+        if not indices:
+            return
+        old_to_new = {}
+        kept = []
+        for old_index, tab in enumerate(self.tab_list._tabs):
+            if old_index in indices:
+                continue
+            old_to_new[old_index] = len(kept)
+            kept.append(tab)
+        self.tab_list._tabs = kept
+        for entry in self.lazy_entries:
+            entry.table_indices = [
+                old_to_new[index]
+                for index in entry.table_indices
+                if index in old_to_new
+            ]
+
+    def remove_selected_sources(self, pane=None):
+        pane = pane or self.active_selector_pane or self.selector_panes[0]
+        selected_items = list(pane.table_list_widget.selectedItems())
+        if not selected_items:
+            return
+        if self.lazy_entries:
+            lazy_indices = sorted({
+                data[1]
+                for item in selected_items
+                for data in [item.data(QtCore.Qt.UserRole)]
+                if isinstance(data, tuple) and data[0] == "lazy"
+            })
+            table_indices = {
+                table_index
+                for lazy_index in lazy_indices
+                for table_index in self.lazy_entries[lazy_index].table_indices
+            }
+            self.lazy_generation += 1
+            self.lazy_load_queue = deque()
+            self.lazy_warning_backlog = []
+            self.lazy_selected_batch = set()
+            self._delete_table_indices(table_indices)
+            remove_set = set(lazy_indices)
+            self.lazy_entries = [
+                entry for index, entry in enumerate(self.lazy_entries)
+                if index not in remove_set
+            ]
+            self.lazy_loaded_total = sum(entry.loaded for entry in self.lazy_entries)
+            self.current_files = [entry.path for entry in self.lazy_entries]
+            removed = len(lazy_indices)
+        else:
+            table_indices = set()
+            for item in selected_items:
+                data = item.data(QtCore.Qt.UserRole)
+                if not isinstance(data, tuple):
+                    continue
+                if data[0] == "table":
+                    table_indices.add(data[1])
+                elif data[0] == "bladed_project":
+                    path = self.normalized_file_path(data[1])
+                    table_indices.update(
+                        index for index, tab in enumerate(self.tab_list)
+                        if tab.filename
+                        and self.normalized_file_path(tab.filename) == path
+                    )
+            removed = len(table_indices)
+            self._delete_table_indices(table_indices)
+            self.current_files = list(dict.fromkeys(
+                tab.filename for tab in self.tab_list if tab.filename
+            ))
+        self.clear()
+        self.populate_tables()
+        self.status_label.setText(
+            "{:,} files indexed, {:,} loaded".format(
+                len(self.lazy_entries), self.lazy_loaded_count()
+            ) if self.lazy_entries else "{} tables loaded".format(len(self.tab_list))
+        )
+        self.statusBar().showMessage(
+            "Removed {:,} simulation(s) from pyDatView".format(removed), 8000
+        )
+
+    def reload_selected_sources(self, pane=None):
+        pane = pane or self.active_selector_pane or self.selector_panes[0]
+        paths = self.selected_source_paths(pane)
+        if not paths:
+            self.statusBar().showMessage("Selected table has no source file", 5000)
+            return
+        normalized_paths = {self.normalized_file_path(path) for path in paths}
+        if self.lazy_entries:
+            selected_indices = [
+                index for index, entry in enumerate(self.lazy_entries)
+                if self.normalized_file_path(entry.path) in normalized_paths
+            ]
+            requests = {}
+            table_indices = set()
+            for index in selected_indices:
+                entry = self.lazy_entries[index]
+                table_indices.update(entry.table_indices)
+                requests[index] = (
+                    None if entry.full_loaded or not entry.loaded_column_indices
+                    else tuple(sorted(entry.loaded_column_indices))
+                )
+            self.lazy_generation += 1
+            self.lazy_load_queue = deque()
+            self.lazy_warning_backlog = []
+            self.lazy_selected_batch = set(selected_indices)
+            self._delete_table_indices(table_indices)
+            for index in selected_indices:
+                entry = self.lazy_entries[index]
+                entry.warning = ""
+                entry.attempted = False
+                entry.loading = False
+                entry.columns = []
+                entry.header_attempted = False
+                entry.loaded_column_indices = set()
+                entry.full_loaded = False
+            self.lazy_loaded_total = sum(entry.loaded for entry in self.lazy_entries)
+            selected_by_pane = [set(normalized_paths) for _ in self.visible_selector_panes()]
+            self.populate_tables(selected_lazy_paths=selected_by_pane)
+            self.begin_lazy_load_batch(len(selected_indices))
+            for index in selected_indices:
+                self.ensure_lazy_loaded(
+                    index,
+                    show_warning=False,
+                    channel_indices=requests[index],
+                )
+            self.statusBar().showMessage(
+                "Reloading {:,} simulation(s)".format(len(selected_indices)), 8000
+            )
+            return
+
+        old_tabs = list(self.tab_list._tabs)
+        replacements = {}
+        warnings = []
+        for path in paths:
+            matching = [
+                tab for tab in old_tabs
+                if tab.filename
+                and self.normalized_file_path(tab.filename)
+                == self.normalized_file_path(path)
+            ]
+            if not matching:
+                continue
+            tabs, warning = self.tab_list._load_file_tabs(
+                path,
+                fileformat=matching[0].fileformat,
+                bReload=True,
+            )
+            if warning:
+                warnings.append(warning)
+            if tabs:
+                for old, new in zip(matching, tabs):
+                    new.name = old.name
+                    new.active_name = old.active_name
+                replacements[self.normalized_file_path(path)] = tabs
+
+        rebuilt = []
+        inserted = set()
+        for tab in old_tabs:
+            key = (
+                self.normalized_file_path(tab.filename) if tab.filename else None
+            )
+            if key not in replacements:
+                rebuilt.append(tab)
+            elif key not in inserted:
+                rebuilt.extend(replacements[key])
+                inserted.add(key)
+        self.tab_list._tabs = rebuilt
+        self.current_files = list(dict.fromkeys(
+            tab.filename for tab in self.tab_list if tab.filename
+        ))
+        self.populate_tables()
+        self.redraw()
+        if warnings:
+            QtWidgets.QMessageBox.warning(
+                self, "Reload warnings", "\n\n".join(warnings[:5])
+            )
+        self.statusBar().showMessage(
+            "Reloaded {:,} simulation(s)".format(len(replacements)), 8000
+        )
+
+    def open_selected_file_locations(self, pane=None):
+        paths = self.selected_source_paths(pane)
+        directories = []
+        for path in paths:
+            directory = os.path.dirname(os.path.abspath(path))
+            if os.path.isdir(directory) and directory not in directories:
+                directories.append(directory)
+        for directory in directories:
+            QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(directory))
+        if not directories:
+            self.statusBar().showMessage("No source file location is available", 5000)
+
     def load_dfs(self, dataframes, names=None):
         if not isinstance(dataframes, list):
             dataframes = [dataframes]
@@ -918,4 +1158,3 @@ class QtLoadingMixin:
         self.update_table_preview()
         self.update_file_info()
         self.on_selection_changed()
-

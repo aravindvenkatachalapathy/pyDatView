@@ -1,5 +1,7 @@
 """Calculation, units, statistics, and export workflows for the Qt window."""
 
+import csv
+import io
 import os
 import time
 import traceback
@@ -160,8 +162,10 @@ class QtToolsStatsMixin:
         )
 
     def clear(self):
+        self.canvas.clear_measurement_marker()
         self.canvas.clear_plot()
         self.plot_data = []
+        self.update_stats()
 
     def open_axis_limits_dialog(self):
         dialog = AxisLimitsDialog(
@@ -210,6 +214,13 @@ class QtToolsStatsMixin:
         self.zoom_area_button.setChecked(enabled)
         self.canvas.set_zoom_mode(enabled)
 
+    def on_measurement_marker_toggled(self, enabled):
+        self.canvas.set_measurement_marker_enabled(enabled)
+        self.coordinate_label.setToolTip(
+            "Click a plot or its X axis to place the marker"
+            if enabled else "Live mouse coordinates"
+        )
+
     def change_ui_font_size(self, delta):
         new_size = max(7, min(20, self._ui_font_size + int(delta)))
         if new_size == self._ui_font_size:
@@ -218,6 +229,13 @@ class QtToolsStatsMixin:
         font = QtGui.QFont(self.font())
         font.setPointSize(new_size)
         self.setFont(font)
+        selector_font = QtGui.QFont(font)
+        selector_font.setPointSize(max(7, new_size - 1))
+        for pane in self.selector_panes:
+            pane.table_list_widget.setFont(selector_font)
+            pane.bladed_dataset_combo.setFont(selector_font)
+            pane.x_combo.setFont(selector_font)
+            pane.y_list_widget.setFont(selector_font)
         coordinate_font = QtGui.QFont(self.coordinate_label.font())
         coordinate_font.setPointSize(new_size)
         self.coordinate_label.setFont(coordinate_font)
@@ -431,6 +449,66 @@ class QtToolsStatsMixin:
             )
             header.resizeSection(directory_column, 220)
         self.stats_table.resizeRowsToContents()
+
+    def stats_table_text(self, delimiter=",", selected_rows_only=False):
+        """Return the visible statistics table in a spreadsheet-safe format."""
+        if self.stats_table.columnCount() == 0:
+            return ""
+        selected_rows = {
+            index.row() for index in self.stats_table.selectionModel().selectedRows()
+        }
+        if not selected_rows_only or not selected_rows:
+            selected_rows = set(range(self.stats_table.rowCount()))
+        output = io.StringIO(newline="")
+        writer = csv.writer(output, delimiter=delimiter, lineterminator="\n")
+        writer.writerow([
+            self.stats_table.horizontalHeaderItem(column).text()
+            for column in range(self.stats_table.columnCount())
+        ])
+        for row in range(self.stats_table.rowCount()):
+            if row not in selected_rows:
+                continue
+            writer.writerow([
+                self.stats_table.item(row, column).text()
+                if self.stats_table.item(row, column) is not None else ""
+                for column in range(self.stats_table.columnCount())
+            ])
+        return output.getvalue()
+
+    def copy_stats(self):
+        text = self.stats_table_text(delimiter="\t", selected_rows_only=True)
+        if not text or self.stats_table.rowCount() == 0:
+            self.statusBar().showMessage("No statistics to copy", 5000)
+            return
+        QtWidgets.QApplication.clipboard().setText(text)
+        selected_count = len(self.stats_table.selectionModel().selectedRows())
+        row_count = selected_count or self.stats_table.rowCount()
+        self.statusBar().showMessage(
+            "Copied statistics for {:,} series".format(row_count), 5000
+        )
+
+    def export_stats_csv(self):
+        if self.stats_table.rowCount() == 0:
+            self.statusBar().showMessage("No statistics to export", 5000)
+            return
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self,
+            "Export statistics",
+            "statistics.csv",
+            "CSV files (*.csv);;All files (*)",
+        )
+        if not path:
+            return
+        if not os.path.splitext(path)[1]:
+            path += ".csv"
+        try:
+            with open(path, "w", encoding="utf-8", newline="") as stream:
+                stream.write(self.stats_table_text(delimiter=","))
+            self.statusBar().showMessage(
+                "Statistics exported to {}".format(path), 10000
+            )
+        except Exception as exc:
+            self.show_exception("Failed to export statistics", exc)
 
     def export_plot_image(self):
         if not self.plot_data:

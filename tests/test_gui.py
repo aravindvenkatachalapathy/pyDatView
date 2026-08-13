@@ -29,6 +29,14 @@ class TestGUI(unittest.TestCase):
             window.font().pointSize(),
             max(7, self.app.font().pointSize() - 1),
         )
+        self.assertEqual(
+            window.selector_panes[0].table_list_widget.font().pointSize(),
+            max(7, window.font().pointSize() - 1),
+        )
+        self.assertEqual(
+            window.selector_panes[0].y_list_widget.font().pointSize(),
+            max(7, window.font().pointSize() - 1),
+        )
         initial_font_size = window.font().pointSize()
         window.increase_font_action.trigger()
         self.assertEqual(window.font().pointSize(), initial_font_size + 1)
@@ -132,6 +140,143 @@ class TestGUI(unittest.TestCase):
 
         window.close()
         self.app.processEvents()
+
+    def test_x_marker_reports_all_curve_intersections(self):
+        from pydatview.qt_main import MainWindow
+
+        window = MainWindow()
+        curves = [
+            SimpleNamespace(
+                x=np.array([0.0, 1.0, 2.0]),
+                y=np.array([0.0, 2.0, 4.0]),
+                sx="Time [s]",
+                sy="A [N]",
+                syl="case A",
+                st="a.out",
+                filename="a.out",
+                it=0,
+                pane_index=0,
+            ),
+            SimpleNamespace(
+                x=np.array([0.0, 2.0]),
+                y=np.array([3.0, 7.0]),
+                sx="Time [s]",
+                sy="B [N]",
+                syl="case B",
+                st="b.out",
+                filename="b.out",
+                it=1,
+                pane_index=0,
+            ),
+        ]
+        window.canvas.plot_data(curves)
+        window.measurement_marker_check.setChecked(True)
+        window.canvas.set_measurement_marker(1.5)
+
+        values = {item["label"]: item for item in window.canvas.measurement_values}
+        self.assertEqual(set(values), {"A [N]", "B [N]"})
+        self.assertAlmostEqual(values["A [N]"]["x"], 1.5)
+        self.assertAlmostEqual(values["A [N]"]["y"], 3.0)
+        self.assertAlmostEqual(values["B [N]"]["y"], 6.0)
+        self.assertGreaterEqual(len(window.canvas._measurement_items), 3)
+        line = window.canvas._measurement_items[0][1]
+        self.assertEqual(line.pen.color().red(), 198)
+
+        window.measurement_marker_check.setChecked(False)
+        self.assertEqual(window.canvas.measurement_values, [])
+        window.close()
+        self.app.processEvents()
+
+    def test_statistics_copy_and_csv_export(self):
+        from unittest.mock import patch
+
+        from pydatview.qt_main import MainWindow, QtWidgets
+
+        window = MainWindow()
+        window.stats_table.setColumnCount(2)
+        window.stats_table.setHorizontalHeaderLabels(["Series", "Mean"])
+        window.stats_table.setRowCount(2)
+        for row, values in enumerate((("case, one", "2.5"), ("case two", "4"))):
+            for column, value in enumerate(values):
+                window.stats_table.setItem(
+                    row, column, QtWidgets.QTableWidgetItem(value)
+                )
+
+        window.copy_stats()
+        copied = QtWidgets.QApplication.clipboard().text()
+        self.assertEqual(copied, "Series\tMean\ncase, one\t2.5\ncase two\t4\n")
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "stats.csv")
+            with patch(
+                "pydatview.qt_tools.QtWidgets.QFileDialog.getSaveFileName",
+                return_value=(path, "CSV files (*.csv)"),
+            ):
+                window.export_stats_csv()
+            with open(path, encoding="utf-8", newline="") as stream:
+                exported = stream.read()
+        self.assertEqual(exported, 'Series,Mean\n"case, one",2.5\ncase two,4\n')
+        window.close()
+        self.app.processEvents()
+
+    def test_remove_selected_simulation_only_removes_it_from_view(self):
+        from pydatview.Tables import Table
+        from pydatview.qt_main import MainWindow
+
+        window = MainWindow()
+        window.tab_list.append([
+            Table(
+                data=pd.DataFrame({"x": [0.0], "a": [1.0]}),
+                name="first",
+                filename="first.out",
+            ),
+            Table(
+                data=pd.DataFrame({"x": [0.0], "b": [2.0]}),
+                name="second",
+                filename="second.out",
+            ),
+        ])
+        window.populate_tables()
+        pane = window.selector_panes[0]
+        pane.table_list_widget.clearSelection()
+        pane.table_list_widget.item(0).setSelected(True)
+        window.remove_selected_sources(pane)
+
+        self.assertEqual(len(window.tab_list), 1)
+        self.assertTrue(window.tab_list[0].filename.endswith("second.out"))
+        self.assertFalse(any(path.endswith("first.out") for path in window.current_files))
+        window.close()
+        self.app.processEvents()
+
+    def test_reload_selected_simulation_and_open_location(self):
+        from unittest.mock import patch
+
+        from pydatview.qt_main import MainWindow
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "case.csv")
+            pd.DataFrame({"Time": [0.0, 1.0], "Load": [1.0, 2.0]}).to_csv(
+                path, index=False
+            )
+            window = MainWindow()
+            window.load_files([path])
+            pane = window.selector_panes[0]
+            self.assertEqual(window.tab_list[0].data["Load"].iloc[-1], 2.0)
+
+            pd.DataFrame({"Time": [0.0, 1.0], "Load": [4.0, 8.0]}).to_csv(
+                path, index=False
+            )
+            window.reload_selected_sources(pane)
+            self.assertEqual(window.tab_list[0].data["Load"].iloc[-1], 8.0)
+
+            with patch(
+                "pydatview.qt_loading.QtGui.QDesktopServices.openUrl"
+            ) as open_url:
+                window.open_selected_file_locations(pane)
+            open_url.assert_called_once()
+            self.assertEqual(open_url.call_args.args[0].toLocalFile(), directory)
+            window.close()
+            self.app.processEvents()
 
     def test_compare_plot_mode_and_swap_xy(self):
         from pydatview.Tables import Table

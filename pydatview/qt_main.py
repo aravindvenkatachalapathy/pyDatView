@@ -174,6 +174,10 @@ class MainWindow(
         self.logy_check = QtWidgets.QCheckBox("Log y")
         self.legend_check = QtWidgets.QCheckBox("Legend")
         self.legend_check.setChecked(False)
+        self.measurement_marker_check = QtWidgets.QCheckBox("X marker")
+        self.measurement_marker_check.setToolTip(
+            "Click a plot or its X axis to show every curve value at that X position"
+        )
         self.line_width_spin = QtWidgets.QDoubleSpinBox()
         self.line_width_spin.setRange(0.25, 8.0)
         self.line_width_spin.setSingleStep(0.25)
@@ -214,6 +218,7 @@ class MainWindow(
         top.addWidget(self.compare_combo, 0, 5)
         top.addWidget(self.live_plot, 0, 6)
         top.addWidget(self.swap_xy_check, 0, 7)
+        top.addWidget(self.measurement_marker_check, 0, 8)
         top.setColumnStretch(9, 1)
         top.addWidget(self.status_label, 0, 10, QtCore.Qt.AlignRight)
 
@@ -430,16 +435,28 @@ class MainWindow(
         self.del_slopes_button.setMenu(self.del_slopes_menu)
         stats_controls.addWidget(self.del_slopes_button)
         stats_controls.addStretch(1)
+        self.copy_stats_button = QtWidgets.QPushButton("Copy")
+        self.copy_stats_button.setToolTip(
+            "Copy selected statistics rows, or all rows when none are selected"
+        )
+        self.export_stats_button = QtWidgets.QPushButton("Export CSV")
+        self.export_stats_button.setToolTip("Export all visible statistics")
+        stats_controls.addWidget(self.copy_stats_button)
+        stats_controls.addWidget(self.export_stats_button)
         stats_layout.addLayout(stats_controls)
         self.stats_table = QtWidgets.QTableWidget()
         self.stats_table.setAlternatingRowColors(True)
         self.stats_table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
         self.stats_table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
-        self.stats_table.setSelectionMode(QtWidgets.QAbstractItemView.SingleSelection)
+        self.stats_table.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
         self.stats_table.verticalHeader().setVisible(False)
         stats_layout.addWidget(self.stats_table, 1)
         self.update_stats_columns_button()
         self.update_del_slopes_button()
+        self.stats_copy_shortcut = QtGui.QShortcut(
+            QtGui.QKeySequence.Copy, self.stats_table
+        )
+        self.stats_copy_shortcut.setContext(QtCore.Qt.WidgetWithChildrenShortcut)
         self.detail_tabs.addTab(self.table_view, "Data")
         self.detail_tabs.addTab(self.stats_panel, "Stats")
         self.detail_tabs.addTab(self.info_text, "File info")
@@ -484,6 +501,10 @@ class MainWindow(
         layout.addWidget(tables_label)
         table_list_widget = QtWidgets.QListWidget()
         table_list_widget.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
+        table_list_widget.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
+        compact_font = QtGui.QFont(self.font())
+        compact_font.setPointSize(max(7, self._ui_font_size - 1))
+        table_list_widget.setFont(compact_font)
         layout.addWidget(table_list_widget, 2)
         bladed_dataset_label = QtWidgets.QLabel("BLADED VARIABLE GROUP")
         bladed_dataset_label.setProperty("sectionLabel", True)
@@ -492,6 +513,7 @@ class MainWindow(
         bladed_dataset_combo = QtWidgets.QComboBox()
         bladed_dataset_combo.setToolTip("Variable group loaded from the selected Bladed .$PJ project")
         bladed_dataset_combo.setVisible(False)
+        bladed_dataset_combo.setFont(compact_font)
         layout.addWidget(bladed_dataset_combo)
         x_label = QtWidgets.QLabel("X COLUMN")
         x_label.setProperty("sectionLabel", True)
@@ -501,12 +523,14 @@ class MainWindow(
         column_filter.setClearButtonEnabled(True)
         layout.addWidget(column_filter)
         x_combo = QtWidgets.QComboBox()
+        x_combo.setFont(compact_font)
         layout.addWidget(x_combo)
         y_label = QtWidgets.QLabel("Y COLUMNS")
         y_label.setProperty("sectionLabel", True)
         layout.addWidget(y_label)
         y_list_widget = QtWidgets.QListWidget()
         y_list_widget.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
+        y_list_widget.setFont(compact_font)
         layout.addWidget(y_list_widget, 3)
 
         pane = SelectorPane(
@@ -520,6 +544,9 @@ class MainWindow(
         )
         table_list_widget.itemSelectionChanged.connect(
             lambda p=pane: self.on_table_selection_changed(p)
+        )
+        table_list_widget.customContextMenuRequested.connect(
+            lambda position, p=pane: self.show_table_context_menu(p, position)
         )
         bladed_dataset_combo.currentIndexChanged.connect(
             lambda _index, p=pane: self.on_bladed_dataset_changed(p)
@@ -916,6 +943,9 @@ class MainWindow(
         self.logx_check.stateChanged.connect(self.on_selection_changed)
         self.logy_check.stateChanged.connect(self.on_selection_changed)
         self.legend_check.stateChanged.connect(self.on_selection_changed)
+        self.measurement_marker_check.toggled.connect(
+            self.on_measurement_marker_toggled
+        )
         self.line_width_spin.valueChanged.connect(self.on_selection_changed)
         self.marker_combo.currentIndexChanged.connect(self.on_selection_changed)
         self.axis_limits_button.clicked.connect(self.open_axis_limits_dialog)
@@ -932,6 +962,9 @@ class MainWindow(
         self.select_none_y_button.clicked.connect(self.select_none_y)
         self.load_selected_button.clicked.connect(self.load_selected_lazy_files)
         self.math_button.clicked.connect(self.open_calculation_dialog)
+        self.copy_stats_button.clicked.connect(self.copy_stats)
+        self.export_stats_button.clicked.connect(self.export_stats_csv)
+        self.stats_copy_shortcut.activated.connect(self.copy_stats)
         for combo in (
             self.fft_output_combo,
             self.fft_averaging_combo,
