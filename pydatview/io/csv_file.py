@@ -6,9 +6,10 @@ except ImportError:
     pl = None
 
 try:
-    from .file import File, WrongFormatError
+    from .file import EmptyFileError, File, WrongFormatError
 except:
     File=dict
+    EmptyFileError = type('EmptyFileError', (Exception,),{})
     WrongFormatError  = type('WrongFormatError', (Exception,),{})
 
 class CSVFile(File):
@@ -220,6 +221,10 @@ class CSVFile(File):
                 #  --- Now, maybe the user has put some units below
                 first_line = readline(iStartLine)
                 #print('>>> first line',first_line)
+                if first_line is None:
+                    raise WrongFormatError(
+                        'CSV file contains column names but no data rows'
+                    )
                 first_cols = split(first_line)
                 nFloat = sum([strIsFloat(s) for s in first_cols])
                 nPa    = first_line.count('(')+first_line.count('[')

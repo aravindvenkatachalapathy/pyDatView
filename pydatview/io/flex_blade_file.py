@@ -13,7 +13,7 @@ class FLEXBladeFile(File):
 
     @staticmethod
     def defaultExtensions():
-        return ['.bld','.bla','.00X'] #'.001 etc..'
+        return ['.bld', '.bla', '.00*']  # .001, .002, etc.
 
     @staticmethod
     def formatName():
@@ -92,9 +92,8 @@ class FLEXBladeFile(File):
                     self.FlapDamping  = Damping[0:2]
                     self.EdgeDamping  = Damping[2:4]
                     self.TorsDamping  = []
-            except:
-                raise
-                raise WrongFormatError('Unable to read damping data')
+            except Exception as error:
+                raise WrongFormatError('Unable to read damping data') from error
 
             # --- Aero
             try:
@@ -136,4 +135,3 @@ class FLEXBladeFile(File):
 
     def _toDataFrame(self):
         return self.data
-

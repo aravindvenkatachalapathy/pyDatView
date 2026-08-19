@@ -2,9 +2,11 @@ import os
 import numpy as np
 import re
 try:
-    from .file import File, WrongFormatError, BrokenFormatError
+    from .file import BrokenFormatError, EmptyFileError, File, WrongFormatError
 except:
     File = dict
+    class EmptyFileError(Exception): pass
+    class WrongFormatError(Exception): pass
     class BrokenFormatError(Exception): pass
 
 class SlowReaderNeededError(Exception):

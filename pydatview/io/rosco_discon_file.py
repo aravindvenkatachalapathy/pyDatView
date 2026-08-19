@@ -7,7 +7,7 @@ import os
 from collections import OrderedDict
 
 try:
-    from .file import File, WrongFormatError, BrokenFormatError
+    from .file import BrokenFormatError, EmptyFileError, File, WrongFormatError
 except:
     File=OrderedDict
     EmptyFileError    = type('EmptyFileError', (Exception,),{})
@@ -63,7 +63,14 @@ class ROSCODISCONFile(File):
         if os.stat(self.filename).st_size == 0:
             raise EmptyFileError('File is empty:',self.filename)
         # --- Calling (children) function to read
-        _, comments, lineKeys = read_DISCON(self.filename, self)
+        try:
+            _, comments, lineKeys = read_DISCON(self.filename, self)
+        except (IndexError, ValueError) as error:
+            raise WrongFormatError(
+                'This does not appear to be a ROSCO DISCON file'
+            ) from error
+        if not lineKeys or not self:
+            raise WrongFormatError('The ROSCO DISCON file contains no parameters')
         self.comments=comments
         self.lineKeys=lineKeys
 

@@ -1,5 +1,5 @@
 
-from weio import userFileClasses
+from . import userFileClasses
 
 UserClasses, UserPaths, UserModules, UserModuleNames, errors = userFileClasses()
 UserClassNames = [cls.__name__ for cls in UserClasses]

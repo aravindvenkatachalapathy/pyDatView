@@ -3,6 +3,7 @@ from .file  import File, WrongFormatError, BrokenFormatError, FileNotFoundError,
 from .file_formats  import FileFormat, isRightFormat
 import sys
 import os
+import fnmatch
 import numpy as np
 
 class FormatNotDetectedError(Exception):
@@ -67,6 +68,7 @@ def fileFormats(userpath=None, ignoreErrors=False, verbose=False):
     from .pickle_file             import PickleFile        
     from .cactus_file             import CactusFile
     from .raawmat_file            import RAAWMatFile
+    from .matlabmat_file          import MatlabMatFile
     from .rosco_discon_file       import ROSCODISCONFile
     from .rosco_performance_file  import ROSCOPerformanceFile
     priorities = []
@@ -110,6 +112,7 @@ def fileFormats(userpath=None, ignoreErrors=False, verbose=False):
     addFormat(60, FileFormat(PickleFile))
     addFormat(70, FileFormat(CactusFile))
     addFormat(70, FileFormat(RAAWMatFile))
+    addFormat(80, FileFormat(MatlabMatFile))
 
     # --- User defined formats from user path
     UserClasses, UserPaths, UserModules, UserModuleNames, errors = userFileClasses(userpath, ignoreErrors, verbose=verbose)
@@ -223,7 +226,6 @@ def detectFormat(filename, **kwargs):
         The method may simply try to open the file, if that's the case
         the read file is returned. """
     import os
-    import re
     global _FORMATS
     if _FORMATS is None:
         formats=fileFormats()
@@ -234,16 +236,15 @@ def detectFormat(filename, **kwargs):
     i = 0 
     while not detected and i<len(formats):
         myformat = formats[i]
-        if ext in myformat.extensions:
+        extensions = [candidate.lower() for candidate in myformat.extensions]
+        if ext in extensions:
             extMatch = True
         else:
-            # Try patterns if present
-            extPatterns = [ef.replace('.',r'\.').replace('$',r'\$').replace('*','[.]*') for ef in myformat.extensions if '*' in ef]
-            if len(extPatterns)>0:
-                extPatMatch = [re.match(pat, ext) is not None for pat in extPatterns]
-                extMatch = any(extPatMatch)
-            else:
-                extMatch = False
+            extMatch = any(
+                fnmatch.fnmatchcase(ext, candidate)
+                for candidate in extensions
+                if '*' in candidate
+            )
         if extMatch: # we have a match on the extension
             #print('Trying format: ',myformat)
             valid, F = isRightFormat(myformat, filename, **kwargs)

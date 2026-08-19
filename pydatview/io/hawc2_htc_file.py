@@ -2,7 +2,7 @@
 Wrapper around wetb to read/write htc files.
 TODO: rewrite of c2_def might not be obvious
 """
-from .file import File
+from .file import File, WrongFormatError
 
 import numpy as np
 import pandas as pd
@@ -22,7 +22,14 @@ class HAWC2HTCFile(File):
         return 'HAWC2 htc file'
 
     def _read(self):
-        self.data = HTCFile(self.filename)
+        try:
+            self.data = HTCFile(self.filename)
+        except (IndexError, KeyError, TypeError, ValueError) as error:
+            raise WrongFormatError(
+                'This does not appear to be a HAWC2 HTC file'
+            ) from error
+        if not hasattr(self.data, 'new_htc_structure'):
+            raise WrongFormatError('This does not appear to be a HAWC2 HTC file')
 
     def _write(self):
         self.data.save(self.filename)

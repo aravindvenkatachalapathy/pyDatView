@@ -39,7 +39,7 @@ class FLEXProfileFile(File):
 
     @staticmethod
     def defaultExtensions():
-        return ['.pro','.00X'] #'.001 etc..'
+        return ['.pro', '.00*']  # .001, .002, etc.
 
     @staticmethod
     def formatName():
@@ -141,4 +141,3 @@ class FLEXProfileFile(File):
                 name='pc_set_{}_t_{}'.format(iset+1,thickness)
                 dfs[name] = pd.DataFrame(data=polar, columns=cols)
         return dfs
-

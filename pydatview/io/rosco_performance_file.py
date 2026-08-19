@@ -323,6 +323,9 @@ def load_from_txt(txt_filename):
     pitch = None
     TSR   = None
     WS    = None
+    Cp    = None
+    Ct    = None
+    Cq    = None
 
     with open(txt_filename) as pfile:
         for iline, line in enumerate(pfile):
@@ -362,6 +365,10 @@ def load_from_txt(txt_filename):
             if pitch is None and iline>10:
                 raise WrongFormatError('This does not appear to be a ROSCO performance file, Pitch vector not found')
 
+        if pitch is None or TSR is None or Cp is None or Ct is None:
+            raise WrongFormatError(
+                'This does not appear to be a ROSCO performance file'
+            )
         return pitch, TSR, WS, Cp, Ct, Cq
 
 
@@ -458,4 +465,3 @@ if __name__ == '__main__':
     print(f)
     dfs = f.toDataFrame()
     print(dfs['CP'])
-

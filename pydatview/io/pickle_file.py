@@ -8,7 +8,7 @@ import pickle
 import builtins
 
 try:
-    from .file import File, WrongFormatError, BrokenFormatError
+    from .file import BrokenFormatError, EmptyFileError, File, WrongFormatError
 except:
     File=dict
     EmptyFileError    = type('EmptyFileError', (Exception,),{})
@@ -171,4 +171,3 @@ class PickleFile(File):
             if verbose:
                 print('[INFO] inserting in namespace: {}'.format(k))
             namespace[k] = v # OR do: builtins.__setattr__(k,v)
-

@@ -23,7 +23,11 @@ class HAWCStab2PwrFile(File):
         with open(self.filename,'r',encoding=self.encoding) as f:
             header = f.readline().strip()
         if len(header)<=0 or header[0]!='#':
-            raise WrongFormatError('Pwr File {}: header line does not start with `#`'.format(self.filename)+e.args[0])
+            raise WrongFormatError(
+                'Pwr File {}: header line does not start with `#`'.format(
+                    self.filename
+                )
+            )
         # Extracting column names
         header       = '0 '+header[1:].strip()
         num_and_cols = [s.strip()+']' for s in header.split(']')[:-1]]
@@ -34,16 +38,18 @@ class HAWCStab2PwrFile(File):
         self.colNames=cols
         # Reading numerical data
         try:
-            self.data = np.loadtxt(self.filename, skiprows=1)
+            self.data = np.atleast_2d(np.loadtxt(self.filename, skiprows=1))
         except Exception as e:    
             raise BrokenFormatError('Pwr File {}: '.format(self.filename)+e.args[0])
 
         if self.data.shape[1]!=len(cols):
-            raise BrokenFormatError('Pwr File {}: inconsistent number of header columns and data columns.'.format(self.filename)+e.args[0])
+            raise BrokenFormatError(
+                'Pwr File {}: inconsistent number of header columns and data '
+                'columns.'.format(self.filename)
+            )
 
     #def _write(self):
         #self.data.to_csv(self.filename,sep=self.false,index=False)
 
     def _toDataFrame(self):
         return pd.DataFrame(data=self.data, columns=self.colNames)
-

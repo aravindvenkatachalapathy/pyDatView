@@ -3,9 +3,16 @@ import pandas as pd
 import os
 
 try:
-    from .file import File, WrongFormatError, BrokenFormatError, OptionalImportError
+    from .file import (
+        BrokenFormatError,
+        EmptyFileError,
+        File,
+        OptionalImportError,
+        WrongFormatError,
+    )
 except:
     File = dict
+    class EmptyFileError(Exception): pass
     class WrongFormatError(Exception): pass
     class BrokenFormatError(Exception): pass
     class OptionalImportError(Exception): pass

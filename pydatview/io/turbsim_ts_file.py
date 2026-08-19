@@ -32,6 +32,8 @@ class TurbSimTSFile(File):
                     iFirstData=i
                     break
                 self['header'].append(line.strip())
+            if iFirstData < 0:
+                raise WrongFormatError('`nComp` not found in TurbSim time series')
             self['nComp'] = int(line.split()[0])
             line          = f.readline().strip()
             nPoints       = int(line.split()[0])
@@ -98,5 +100,4 @@ class TurbSimTSFile(File):
         dfs['TimeSeries'] = pd.DataFrame(data = self['data'] ,columns = Cols)
 
         return dfs
-
 

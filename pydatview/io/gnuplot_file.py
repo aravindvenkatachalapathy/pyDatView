@@ -7,7 +7,7 @@ import os
 
 
 try:
-    from .file import File, WrongFormatError, BrokenFormatError
+    from .file import BrokenFormatError, EmptyFileError, File, WrongFormatError
 except:
     File=dict
     EmptyFileError    = type('EmptyFileError', (Exception,),{})

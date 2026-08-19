@@ -13,11 +13,11 @@ class FLEXDocFile(File):
 
     @staticmethod
     def defaultExtensions():
-        return ['.out','doc']
+        return ['.out', '.doc']
 
     @staticmethod
     def formatName():
-        return 'FLEX WaveKin file'
+        return 'FLEX documentation file'
 
     def _read(self):
         with open(self.filename, 'r', errors="surrogateescape") as f:
@@ -205,4 +205,3 @@ class FLEXDocFile(File):
                     if type(v2) is pd.DataFrame:
                         dfs[k+'_'+k2]=v2
         return dfs
-

@@ -1,4 +1,4 @@
-from .file import File, WrongFormatError
+from .file import BrokenFormatError, File, WrongFormatError
 import numpy as np
 import pandas as pd
 from .csv_file import CSVFile
@@ -15,8 +15,15 @@ class HAWCStab2CmbFile(File):
         return 'HAWCStab2 Campbell file'
 
     def _read(self):
-        f = CSVFile(self.filename, detectColumnNames=False, commentLines=[0])
-        nModes=int(f.header[0].split()[-1])
+        try:
+            f = CSVFile(self.filename, detectColumnNames=False, commentLines=[0])
+            nModes = int(f.header[0].split()[-1])
+        except (AttributeError, IndexError, TypeError, ValueError) as error:
+            raise WrongFormatError(
+                'Unable to read the HAWCStab2 Campbell header'
+            ) from error
+        if nModes <= 0:
+            raise BrokenFormatError('The Campbell file reports no modes')
         nCols = f.data.shape[1]-1
         colsF = ['F{}'.format(i+1) for i in range(nModes)]
         colsD = ['D{}'.format(i+1) for i in range(nModes)]
@@ -28,9 +35,12 @@ class HAWCStab2CmbFile(File):
             cols+=colsR
         else:
             colsR=[]
+        if len(cols) != nCols:
+            raise BrokenFormatError(
+                'Campbell data columns are inconsistent with the number of modes'
+            )
         f.data.columns = ['Wind_[m/s]'] + cols
         self.data = f.toDataFrame()
 
     def _toDataFrame(self):
         return self.data
-

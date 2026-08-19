@@ -2,6 +2,7 @@
 import pandas as pd
 import numpy as np
 import os
+from scipy.io.matlab import MatReadError
 
 
 def matfile(path_file,output='pandas',path_key=None):
@@ -111,7 +112,7 @@ def matfile(path_file,output='pandas',path_key=None):
         return ds
 
 try:
-    from .file import File, WrongFormatError, BrokenFormatError
+    from .file import BrokenFormatError, EmptyFileError, File, WrongFormatError
 except:
     EmptyFileError    = type('EmptyFileError', (Exception,),{})
     WrongFormatError  = type('WrongFormatError', (Exception,),{})
@@ -176,7 +177,14 @@ class RAAWMatFile(File):
 
     def _read(self):
         """ Reads self.filename and stores data into self. Self is (or behaves like) a dictionary"""
-        self['data'] = matfile(self.filename,output='pandas')
+        try:
+            self['data'] = matfile(self.filename, output='pandas')
+        except (KeyError, MatReadError) as error:
+            if isinstance(error, MatReadError) or error.args == ('DataCell',):
+                raise WrongFormatError(
+                    'The MATLAB file does not contain RAAW DataCell data'
+                ) from error
+            raise
 
     def _write(self):
         """ Writes to self.filename"""

@@ -1,7 +1,11 @@
 openpyxl
+xlrd
 numpy
 pandas
 xarray
+netCDF4
+nptdms
+f90nml
 pyarrow # for parquet files
 matplotlib 
 chardet

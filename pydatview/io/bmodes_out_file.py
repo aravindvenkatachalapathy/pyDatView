@@ -6,7 +6,7 @@ import pandas as pd
 import os
 
 try:
-    from .file import File, WrongFormatError, BrokenFormatError
+    from .file import BrokenFormatError, EmptyFileError, File, WrongFormatError
 except:
     File=dict
     EmptyFileError    = type('EmptyFileError', (Exception,),{})
@@ -149,4 +149,3 @@ if __name__ == '__main__':
     df = f.toDataFrame()
     print(f)
     print(df)
-
