@@ -1,5 +1,6 @@
 import os
 from collections import OrderedDict
+from itertools import islice, product
 
 import numpy as np
 import pandas as pd
@@ -15,16 +16,14 @@ class _NetCDFSliceMatrix:
     def __init__(
             self,
             variable,
-            slice_dimension,
-            slice_index,
             row_dimension,
             column_dimension,
+            fixed_indices=None,
             cache_size=4):
         self.variable = variable
-        self.slice_dimension = slice_dimension
-        self.slice_index = slice_index
         self.row_dimension = row_dimension
         self.column_dimension = column_dimension
+        self.fixed_indices = dict(fixed_indices or {})
         self.shape = (
             variable.sizes[self.row_dimension],
             variable.sizes[self.column_dimension],
@@ -38,10 +37,9 @@ class _NetCDFSliceMatrix:
         if cached is not None:
             self._column_cache[column_index] = cached
             return cached
-        values = np.asarray(self.variable.isel({
-            self.slice_dimension: self.slice_index,
-            self.column_dimension: column_index,
-        }).values)
+        indices = dict(self.fixed_indices)
+        indices[self.column_dimension] = column_index
+        values = np.asarray(self.variable.isel(indices).values)
         self._column_cache[column_index] = values
         while len(self._column_cache) > self.cache_size:
             self._column_cache.popitem(last=False)
@@ -58,7 +56,8 @@ class _NetCDFSliceMatrix:
 
 class NetCDFFile(File):
 
-    _EAGER_3D_LIMIT_BYTES = 128 * 1024 * 1024
+    _EAGER_DATA_LIMIT_BYTES = 128 * 1024 * 1024
+    _MAX_SLICE_TABLES = 512
 
     _COMPONENT_DIMENSION_NAMES = {
         'axis',
@@ -137,6 +136,46 @@ class NetCDFFile(File):
         return min(variable.dims, key=lambda dim: variable.sizes[dim])
 
     @classmethod
+    def _plane_and_slice_dimensions(cls, variable):
+        if variable.ndim == 3:
+            slice_dimension = cls._slice_dimension(variable)
+            plane_dimensions = [
+                dimension for dimension in variable.dims
+                if dimension != slice_dimension
+            ]
+        else:
+            non_component = [
+                dimension for dimension in variable.dims
+                if str(dimension).lower()
+                not in cls._COMPONENT_DIMENSION_NAMES
+            ]
+            ranked = sorted(
+                non_component,
+                key=lambda dimension: variable.sizes[dimension],
+                reverse=True,
+            )
+            ranked.extend(
+                dimension for dimension in sorted(
+                    variable.dims,
+                    key=lambda item: variable.sizes[item],
+                    reverse=True,
+                )
+                if dimension not in ranked
+            )
+            plane_dimensions = ranked[:2]
+
+        plane_dimensions = sorted(
+            plane_dimensions,
+            key=lambda dimension: variable.sizes[dimension],
+            reverse=True,
+        )
+        slice_dimensions = [
+            dimension for dimension in variable.dims
+            if dimension not in plane_dimensions
+        ]
+        return tuple(plane_dimensions), tuple(slice_dimensions)
+
+    @classmethod
     def _orient_two_dimensional_variable(cls, variable):
         first_dimension, second_dimension = variable.dims
         if variable.sizes[first_dimension] < variable.sizes[second_dimension]:
@@ -174,7 +213,7 @@ class NetCDFFile(File):
                 columns[column] = placeholder
         return pd.DataFrame(columns)
 
-    def _lazy_3d_variable(self, variable):
+    def _lazy_numeric_variable(self, variable):
         try:
             numeric = np.issubdtype(variable.dtype, np.number)
         except TypeError:
@@ -182,26 +221,78 @@ class NetCDFFile(File):
         if not numeric:
             return False
         return (
-            self.size >= self._EAGER_3D_LIMIT_BYTES
-            or variable.nbytes >= self._EAGER_3D_LIMIT_BYTES
+            self.size >= self._EAGER_DATA_LIMIT_BYTES
+            or variable.nbytes >= self._EAGER_DATA_LIMIT_BYTES
         )
 
-    def _three_dimensional_frames(self, name, variable):
-        slice_dimension = self._slice_dimension(variable)
-        slice_values = self._dimension_values(variable, slice_dimension)
-        group = ('netcdf-3d', os.path.abspath(self.filename), str(name))
-        lazy_values = self._lazy_3d_variable(variable)
+    def _lazy_two_dimensional_frame(self, name, variable):
+        plane = self._orient_two_dimensional_variable(variable)
+        frame = self._two_dimensional_frame(name, plane, load_values=False)
+        frame.attrs['pydatview'] = {
+            'lazy_values': True,
+            'lazy_column_offset': 2,
+            'source_variable': str(name),
+        }
+        self._native_plot_sources[name] = (
+            _NetCDFSliceMatrix(
+                variable,
+                plane.dims[0],
+                plane.dims[1],
+            ),
+            2,
+            'xarray lazy NetCDF',
+        )
+        return frame
+
+    def _dimension_value(self, variable, dimension, index):
+        coordinate = variable.coords.get(dimension)
+        if coordinate is not None and coordinate.dims == (dimension,):
+            value = coordinate.isel({dimension: index}).values
+            return np.asarray(value).item()
+        return index
+
+    def _multidimensional_frames(self, name, variable):
+        plane_dimensions, slice_dimensions = (
+            self._plane_and_slice_dimensions(variable)
+        )
+        group = ('netcdf-nd', os.path.abspath(self.filename), str(name))
+        lazy_values = self._lazy_numeric_variable(variable)
+        slice_shape = tuple(
+            variable.sizes[dimension] for dimension in slice_dimensions
+        )
+        slice_count = int(np.prod(slice_shape, dtype=np.int64))
+        shown_count = min(slice_count, self._MAX_SLICE_TABLES)
+        combinations = islice(
+            product(*(range(size) for size in slice_shape)),
+            shown_count,
+        )
         frames = {}
-        for slice_index, coordinate in enumerate(slice_values):
-            plane = variable.isel({slice_dimension: slice_index}, drop=True)
+        for sequence_index, combination in enumerate(combinations):
+            fixed_indices = dict(zip(slice_dimensions, combination))
+            coordinates = {
+                dimension: self._dimension_value(
+                    variable,
+                    dimension,
+                    fixed_indices[dimension],
+                )
+                for dimension in slice_dimensions
+            }
+            plane = variable.isel(fixed_indices, drop=True)
+            plane = plane.transpose(*plane_dimensions)
             plane = self._orient_two_dimensional_variable(plane)
-            key = '{} [{}={}]'.format(
+            labels = ', '.join(
+                '{}={}'.format(
+                    dimension,
+                    self._coordinate_text(coordinates[dimension]),
+                )
+                for dimension in slice_dimensions
+            )
+            key = '{} [{}]'.format(
                 name,
-                slice_dimension,
-                self._coordinate_text(coordinate),
+                labels,
             )
             if key in frames:
-                key = '{} [index={}]'.format(key, slice_index)
+                key = '{} [slice={}]'.format(key, sequence_index)
             frame = self._two_dimensional_frame(
                 name,
                 plane,
@@ -211,20 +302,34 @@ class NetCDFFile(File):
                 'side_by_side_group': group,
                 'lazy_values': lazy_values,
                 'lazy_column_offset': 2,
-                'slice_dimension': str(slice_dimension),
-                'slice_index': slice_index,
-                'slice_value': self._coordinate_text(coordinate),
+                'slice_dimensions': tuple(map(str, slice_dimensions)),
+                'slice_indices': tuple(combination),
+                'slice_values': tuple(
+                    self._coordinate_text(coordinates[dimension])
+                    for dimension in slice_dimensions
+                ),
+                'slice_tables_total': slice_count,
+                'slice_tables_shown': shown_count,
+                'slice_tables_truncated': shown_count < slice_count,
                 'source_variable': str(name),
             }
+            if len(slice_dimensions) == 1:
+                dimension = slice_dimensions[0]
+                frame.attrs['pydatview'].update({
+                    'slice_dimension': str(dimension),
+                    'slice_index': combination[0],
+                    'slice_value': self._coordinate_text(
+                        coordinates[dimension]
+                    ),
+                })
             frames[key] = frame
             if lazy_values:
                 self._native_plot_sources[key] = (
                     _NetCDFSliceMatrix(
                         variable,
-                        slice_dimension,
-                        slice_index,
                         plane.dims[0],
                         plane.dims[1],
+                        fixed_indices=fixed_indices,
                     ),
                     2,
                     'xarray lazy NetCDF',
@@ -240,16 +345,19 @@ class NetCDFFile(File):
         xarray supplies dimension coordinates as columns. Keeping variables in
         separate frames avoids broadcasting unrelated variables onto the full
         Cartesian product of every dimension in the dataset. Three-dimensional
-        variables become grouped two-dimensional slice tables so the GUI can
-        display sibling slices in side-by-side selector panes.
+        variables with three or more dimensions become grouped two-dimensional
+        slice tables so the GUI can display sibling slices in side-by-side
+        selector panes.
         """
         self._native_plot_sources = {}
         dfs = {}
         for name, variable in self.data.data_vars.items():
             if variable.ndim == 0:
                 dfs[name] = pd.DataFrame({name: [variable.item()]})
-            elif variable.ndim == 3:
-                dfs.update(self._three_dimensional_frames(name, variable))
+            elif variable.ndim == 2 and self._lazy_numeric_variable(variable):
+                dfs[name] = self._lazy_two_dimensional_frame(name, variable)
+            elif variable.ndim >= 3:
+                dfs.update(self._multidimensional_frames(name, variable))
             else:
                 dfs[name] = variable.to_dataframe(name=name).reset_index()
         return dfs

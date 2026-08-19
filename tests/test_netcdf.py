@@ -120,7 +120,7 @@ class TestNetCDFFile(unittest.TestCase):
         )
 
     def test_large_3d_variable_loads_plot_columns_on_demand(self):
-        with patch.object(NetCDFFile, '_EAGER_3D_LIMIT_BYTES', 1):
+        with patch.object(NetCDFFile, '_EAGER_DATA_LIMIT_BYTES', 1):
             tables, warnings = TableList().load_tables_from_files([self.path])
 
         self.assertFalse(warnings)
@@ -140,6 +140,70 @@ class TestNetCDFFile(unittest.TestCase):
             cube_u._native_plot_backend,
             'xarray lazy NetCDF',
         )
+
+    def test_large_2d_variable_loads_plot_columns_on_demand(self):
+        with patch.object(NetCDFFile, '_EAGER_DATA_LIMIT_BYTES', 1):
+            tables, warnings = TableList().load_tables_from_files([self.path])
+
+        self.assertFalse(warnings)
+        field = next(table for table in tables if table.nickname == 'field')
+        self.assertTrue(field.source_metadata['lazy_values'])
+        values, _is_string, _is_date, _series = field.getColumn(2)
+        np.testing.assert_array_equal(values, [0.0, 2.0, 4.0])
+
+    def test_large_4d_variable_becomes_lazy_2d_slices(self):
+        path = os.path.join(self.temp_dir.name, 'four_dimensional.nc')
+        xr.Dataset(
+            data_vars={
+                'temperature': (
+                    ('time', 'level', 'y', 'x'),
+                    np.arange(48.0).reshape(2, 2, 3, 4),
+                ),
+            },
+            coords={
+                'time': [0, 1],
+                'level': [10, 20],
+                'y': [-1, 0, 1],
+                'x': [0, 1, 2, 3],
+            },
+        ).to_netcdf(path, engine='scipy')
+
+        with patch.object(NetCDFFile, '_EAGER_DATA_LIMIT_BYTES', 1):
+            tables, warnings = TableList().load_tables_from_files([path])
+
+        self.assertFalse(warnings)
+        self.assertEqual(len(tables), 4)
+        first = tables[0]
+        self.assertEqual(
+            first.nickname,
+            'temperature [time=0, level=10]',
+        )
+        self.assertEqual(
+            first.source_metadata['slice_dimensions'],
+            ('time', 'level'),
+        )
+        values, _is_string, _is_date, _series = first.getColumn(2)
+        np.testing.assert_array_equal(values, [0.0, 1.0, 2.0, 3.0])
+
+    def test_multidimensional_slice_table_count_is_bounded(self):
+        path = os.path.join(self.temp_dir.name, 'many_slices.nc')
+        xr.Dataset(
+            data_vars={
+                'volume': (
+                    ('a', 'b', 'y', 'x'),
+                    np.arange(216.0).reshape(3, 3, 4, 6),
+                ),
+            },
+        ).to_netcdf(path, engine='scipy')
+
+        with patch.object(NetCDFFile, '_EAGER_DATA_LIMIT_BYTES', 1), \
+                patch.object(NetCDFFile, '_MAX_SLICE_TABLES', 4):
+            tables, warnings = TableList().load_tables_from_files([path])
+
+        self.assertFalse(warnings)
+        self.assertEqual(len(tables), 4)
+        self.assertEqual(tables[0].source_metadata['slice_tables_total'], 9)
+        self.assertTrue(tables[0].source_metadata['slice_tables_truncated'])
 
 
 if __name__ == '__main__':

@@ -303,6 +303,11 @@ class QtToolsStatsMixin:
             lines.append("Shape: {}".format(tab.shapestring))
             if tab.source_metadata.get('lazy_values'):
                 lines.append("Data: NetCDF values loaded on demand")
+            if tab.source_metadata.get('slice_tables_truncated'):
+                lines.append("Slices: showing {} of {} (safety limit)".format(
+                    tab.source_metadata['slice_tables_shown'],
+                    tab.source_metadata['slice_tables_total'],
+                ))
             lines.append("Columns: {}".format(", ".join(map(str, tab.columns[:40]))))
             if len(tab.columns) > 40:
                 lines.append("...")
