@@ -265,7 +265,22 @@ class QtLoadingMixin:
             if len(new_tabs) == 0 and len(self.tab_list) == 0:
                 self.status_label.setText("No tables loaded")
                 return time.perf_counter() - t0
-            self.populate_tables()
+            selected_table_indices = None
+            if not add:
+                groups = self.tab_list.side_by_side_groups(new_tabs)
+                group = next((items for items in groups if len(items) >= 2), None)
+                if group is not None:
+                    pane_count = min(3, len(group))
+                    self.compare_combo.setCurrentText(str(pane_count))
+                    table_indices = {
+                        id(tab): index for index, tab in enumerate(self.tab_list)
+                    }
+                    selected_table_indices = [
+                        table_indices[id(tab)] for tab in group[:pane_count]
+                    ]
+            self.populate_tables(
+                selected_table_indices=selected_table_indices
+            )
             self.status_label.setText("{} tables loaded".format(len(self.tab_list)))
             self.redraw()
             return time.perf_counter() - t0
@@ -995,7 +1010,10 @@ class QtLoadingMixin:
         if filenames:
             self.load_files(filenames, add=False)
 
-    def populate_tables(self, selected_lazy_paths=None):
+    def populate_tables(
+            self,
+            selected_lazy_paths=None,
+            selected_table_indices=None):
         visible = self.visible_selector_panes()
         names = self.tab_list.getDisplayTabNames() if not self.lazy_entries else []
         self.lazy_item_widgets = {}
@@ -1050,6 +1068,18 @@ class QtLoadingMixin:
                     ):
                         item.setSelected(True)
                         restored_selection = True
+            elif not self.lazy_entries and selected_table_indices is not None:
+                target = (
+                    selected_table_indices[pane_index]
+                    if pane_index < len(selected_table_indices)
+                    else None
+                )
+                for row in range(pane.table_list_widget.count()):
+                    item = pane.table_list_widget.item(row)
+                    if item.data(QtCore.Qt.UserRole) == ('table', target):
+                        item.setSelected(True)
+                        restored_selection = True
+                        break
             if pane.table_list_widget.count() > 0 and not restored_selection:
                 default_row = min(pane_index, pane.table_list_widget.count() - 1)
                 pane.table_list_widget.item(default_row).setSelected(True)

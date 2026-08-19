@@ -48,6 +48,57 @@ class TestGUI(unittest.TestCase):
         window.close()
         self.app.processEvents()
 
+    def test_3d_netcdf_slices_open_in_side_by_side_selectors(self):
+        import xarray as xr
+
+        from pydatview.qt_main import MainWindow, QtCore
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = os.path.join(temp_dir, 'vector_field.nc')
+            xr.Dataset(
+                data_vars={
+                    'velocity': (
+                        ('time', 'height', 'component'),
+                        np.arange(12.0).reshape(3, 2, 2),
+                    ),
+                },
+                coords={
+                    'time': [0.0, 1.0, 2.0],
+                    'height': [50.0, 100.0],
+                    'component': ['u', 'v'],
+                },
+            ).to_netcdf(path, engine='scipy')
+
+            window = MainWindow()
+            window.load_files([path])
+            window.redraw_timer.stop()
+
+            self.assertEqual(window.compare_combo.currentText(), '2')
+            panes = window.visible_selector_panes()
+            self.assertEqual(len(panes), 2)
+            selected_names = []
+            for pane in panes:
+                selected = pane.table_list_widget.selectedItems()
+                self.assertEqual(len(selected), 1)
+                kind, table_index = selected[0].data(QtCore.Qt.UserRole)
+                self.assertEqual(kind, 'table')
+                selected_names.append(window.tab_list[table_index].nickname)
+                self.assertEqual(pane.x_combo.currentText(), 'time')
+                selected_y = pane.y_list_widget.selectedItems()
+                self.assertGreaterEqual(len(selected_y), 1)
+                self.assertTrue(
+                    selected_y[0].text().startswith(
+                        'velocity [height='
+                    )
+                )
+
+            self.assertEqual(
+                selected_names,
+                ['velocity [component=u]', 'velocity [component=v]'],
+            )
+            window.close()
+            self.app.processEvents()
+
     def test_standardize_wind_energy_openfast_units(self):
         from unittest.mock import patch
 

@@ -390,6 +390,18 @@ class TableList(object): # todo inherit list
                     unique_fileobjects.append(t.fileobject)
         return unique_fileobjects
 
+    def side_by_side_groups(self, tabs=None):
+        """Return ordered groups of tables intended for parallel selectors."""
+        tabs = self._tabs if tabs is None else tabs
+        groups = {}
+        for tab in tabs:
+            group = getattr(tab, 'source_metadata', {}).get(
+                'side_by_side_group'
+            )
+            if group is not None:
+                groups.setdefault(group, []).append(tab)
+        return list(groups.values())
+
     @property
     def fileformats(self):
         return [t.fileformat for t in self._tabs]
@@ -568,6 +580,10 @@ class Table(object):
         self._native_plot_column_offset = 0
         self._native_plot_backend = ''
         self._native_plot_logged = False
+        metadata = getattr(data, 'attrs', {}).get('pydatview', {})
+        self.source_metadata = (
+            dict(metadata) if isinstance(metadata, dict) else {}
+        )
 
         self.filename        = filename
         self.fileformat      = fileformat
@@ -622,7 +638,7 @@ class Table(object):
         if source is None:
             return
         matrix, column_offset, backend = source
-        if not isinstance(matrix, np.ndarray) or matrix.ndim != 2:
+        if getattr(matrix, 'ndim', None) != 2:
             return
         if matrix.shape[0] != self.data.shape[0]:
             return

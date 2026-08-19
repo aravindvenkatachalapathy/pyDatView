@@ -32,6 +32,12 @@ class DataFrameModel(QtCore.QAbstractTableModel):
     def data(self, index, role=QtCore.Qt.DisplayRole):
         if role != QtCore.Qt.DisplayRole or self.dataframe is None or not index.isValid():
             return None
+        metadata = getattr(self.dataframe, 'attrs', {}).get('pydatview', {})
+        if (
+            metadata.get('lazy_values')
+            and index.column() >= metadata.get('lazy_column_offset', 2)
+        ):
+            return '<loaded when plotted>'
         value = self.dataframe.iat[index.row(), index.column()]
         return "" if value is None else str(value)
 
@@ -426,4 +432,3 @@ class ScanDialog(QtWidgets.QDialog):
         self.settings.setValue("scan/geometry", self.saveGeometry())
         self.settings.sync()
         super().accept()
-

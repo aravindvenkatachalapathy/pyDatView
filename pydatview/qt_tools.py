@@ -301,6 +301,8 @@ class QtToolsStatsMixin:
             lines.append("File: {}".format(tab.filename))
             lines.append("Format: {}".format(tab.fileformat_name))
             lines.append("Shape: {}".format(tab.shapestring))
+            if tab.source_metadata.get('lazy_values'):
+                lines.append("Data: NetCDF values loaded on demand")
             lines.append("Columns: {}".format(", ".join(map(str, tab.columns[:40]))))
             if len(tab.columns) > 40:
                 lines.append("...")
