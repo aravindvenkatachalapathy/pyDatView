@@ -6,7 +6,7 @@ import numpy as np
 
 from pydatview.qt_compat import QtCore, QtWidgets
 from pydatview.qt_io import _format_specs, _parse_bladed_suffixes
-from pydatview.qt_math import _MATH_FUNCTIONS
+from pydatview.qt_math import _MATH_FUNCTIONS, _TABLE_TRANSFORMS
 
 class DataFrameModel(QtCore.QAbstractTableModel):
     def __init__(self, dataframe=None, max_rows=200):
@@ -50,7 +50,11 @@ class DataFrameModel(QtCore.QAbstractTableModel):
 
 
 class CalculationDialog(QtWidgets.QDialog):
-    def __init__(self, columns, selected_columns=None, parent=None):
+    def __init__(
+            self,
+            columns,
+            selected_columns=None,
+            parent=None):
         super().__init__(parent)
         self.setWindowTitle("Mathematical operation")
         self.resize(680, 470)
@@ -79,15 +83,19 @@ class CalculationDialog(QtWidgets.QDialog):
         expression_layout = QtWidgets.QFormLayout(expression_panel)
         expression_layout.setContentsMargins(8, 0, 0, 0)
         expression_layout.setSpacing(8)
+        self.operation_mode = QtWidgets.QComboBox()
+        self.operation_mode.addItem("Derived variable", "column")
+        self.operation_mode.addItem("Transform entire file", "table")
+        expression_layout.addRow("Mode", self.operation_mode)
         self.result_name = QtWidgets.QLineEdit()
         self.result_name.setText("Calculated")
-        expression_layout.addRow("Result name", self.result_name)
+        self.result_name_label = QtWidgets.QLabel("Result name")
+        expression_layout.addRow(self.result_name_label, self.result_name)
         self.expression = QtWidgets.QPlainTextEdit()
         self.expression.setMaximumHeight(110)
-        expression_layout.addRow("Expression", self.expression)
+        self.expression_label = QtWidgets.QLabel("Expression")
+        expression_layout.addRow(self.expression_label, self.expression)
         self.function_combo = QtWidgets.QComboBox()
-        self.function_combo.addItem("Insert function")
-        self.function_combo.addItems(list(_MATH_FUNCTIONS))
         expression_layout.addRow("Function", self.function_combo)
         content.addWidget(expression_panel)
         content.setSizes([260, 400])
@@ -106,12 +114,61 @@ class CalculationDialog(QtWidgets.QDialog):
         elif selected_columns:
             self.expression.setPlainText("{{{}}}".format(selected_columns[0]))
 
+        transform_script = "trim(start=0, stop=1)"
+        self._mode_values = {
+            "column": (
+                self.result_name.text(),
+                self.expression.toPlainText(),
+            ),
+            "table": ("_trimmed", transform_script),
+        }
+        self._active_mode = "column"
+
         self.column_filter.textChanged.connect(lambda _text: self.populate_columns())
         self.column_list.itemDoubleClicked.connect(self.insert_column)
         self.function_combo.activated.connect(self.insert_function)
+        self.operation_mode.currentIndexChanged.connect(self.on_mode_changed)
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
+        self.update_function_combo()
         self.populate_columns()
+
+    def mode(self):
+        return self.operation_mode.currentData()
+
+    def update_function_combo(self):
+        self.function_combo.blockSignals(True)
+        self.function_combo.clear()
+        self.function_combo.addItem("Insert function")
+        functions = (
+            _TABLE_TRANSFORMS if self.mode() == "table" else _MATH_FUNCTIONS
+        )
+        self.function_combo.addItems(list(functions))
+        self.function_combo.blockSignals(False)
+
+    def on_mode_changed(self, _index=None):
+        self._mode_values[self._active_mode] = (
+            self.result_name.text(),
+            self.expression.toPlainText(),
+        )
+        self._active_mode = self.mode()
+        result_name, expression = self._mode_values[self._active_mode]
+        self.result_name.setText(result_name)
+        self.expression.setPlainText(expression)
+        table_mode = self._active_mode == "table"
+        self.result_name_label.setText(
+            "Table suffix" if table_mode else "Result name"
+        )
+        self.expression_label.setText("Script" if table_mode else "Expression")
+        self.expression.setToolTip(
+            "One safe table transform per line; trim bounds are inclusive"
+            if table_mode
+            else "Expression used to calculate the new variable"
+        )
+        self.add_button.setText(
+            "Transform file" if table_mode else "Add and plot"
+        )
+        self.update_function_combo()
 
     def populate_columns(self):
         text_filter = self.column_filter.text().strip().lower()

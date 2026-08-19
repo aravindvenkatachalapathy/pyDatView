@@ -48,6 +48,21 @@ class TestGUI(unittest.TestCase):
         window.close()
         self.app.processEvents()
 
+    def test_calculation_dialog_has_file_transform_mode(self):
+        from pydatview.qt_dialogs import CalculationDialog
+
+        dialog = CalculationDialog(['Index', 'Time_[s]', 'Power_[kW]'])
+        dialog.operation_mode.setCurrentIndex(1)
+
+        self.assertEqual(dialog.mode(), 'table')
+        self.assertEqual(dialog.result_name.text(), '_trimmed')
+        self.assertEqual(
+            dialog.expression.toPlainText(),
+            'trim(start=0, stop=1)',
+        )
+        self.assertEqual(dialog.add_button.text(), 'Transform file')
+        dialog.close()
+
     def test_3d_netcdf_slices_open_in_side_by_side_selectors(self):
         import xarray as xr
 

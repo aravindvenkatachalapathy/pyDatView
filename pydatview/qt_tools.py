@@ -13,7 +13,10 @@ from pydatview.qt_dialogs import (
     AxisLimitsDialog,
     CalculationDialog,
 )
-from pydatview.qt_math import evaluate_math_expression
+from pydatview.qt_math import (
+    evaluate_math_expression,
+    transform_file_tables,
+)
 from pydatview.qt_publication import (
     PublicationExportDialog,
     export_publication_plot,
@@ -69,6 +72,14 @@ class QtToolsStatsMixin:
             return
 
         result_name, expression = dialog.values()
+        if dialog.mode() == "table":
+            self.apply_table_transform_to_file(
+                table_index,
+                result_name,
+                expression,
+                pane,
+            )
+            return
         if result_name in [str(column) for column in tab.data.columns]:
             QtWidgets.QMessageBox.warning(
                 self,
@@ -115,6 +126,60 @@ class QtToolsStatsMixin:
             "Added calculated variable '{}' to {}".format(result_name, tab.nickname),
             10000,
         )
+
+    def apply_table_transform_to_file(
+            self,
+            table_index,
+            suffix,
+            script,
+            pane):
+        try:
+            pending, target_indices, trimmed_count, static_count = (
+                transform_file_tables(
+                    self.tab_list,
+                    table_index,
+                    suffix,
+                    script,
+                )
+            )
+        except Exception as exc:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Transform entire file",
+                "{}: {}".format(type(exc).__name__, exc),
+            )
+            return
+
+        transform_group = "table-transform-{}".format(time.time_ns())
+        first_new_index = len(self.tab_list)
+        for table in pending:
+            table.source_metadata['transform_group'] = transform_group
+            table.source_metadata['transform_script'] = script
+        self.tab_list.append(pending)
+        selected_offset = target_indices.index(table_index)
+        display_offsets = list(range(selected_offset, len(pending)))
+        display_offsets.extend(range(0, selected_offset))
+        selected_indices = [
+            first_new_index + offset
+            for offset in display_offsets[:len(self.visible_selector_panes())]
+        ]
+        self.populate_tables(selected_table_indices=selected_indices)
+        pane = (
+            self.visible_selector_panes()[0]
+            if self.visible_selector_panes()
+            else pane
+        )
+        if pane is not None:
+            self.active_selector_pane = pane
+        self.update_table_preview()
+        self.update_file_info()
+        self.redraw()
+        message = "Transformed {:,} time-dependent table(s)".format(trimmed_count)
+        if static_count:
+            message += "; copied {:,} static table(s) unchanged".format(
+                static_count
+            )
+        self.statusBar().showMessage(message, 12000)
 
     def standardize_units(self, flavor, label):
         partial = [

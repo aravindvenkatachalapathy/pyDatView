@@ -9,6 +9,7 @@ import xarray as xr
 from pydatview.Tables import TableList
 from pydatview.io import detectFormat
 from pydatview.io.netcdf_file import NetCDFFile
+from pydatview.qt_math import transform_file_tables
 
 
 class TestNetCDFFile(unittest.TestCase):
@@ -140,6 +141,32 @@ class TestNetCDFFile(unittest.TestCase):
             cube_u._native_plot_backend,
             'xarray lazy NetCDF',
         )
+
+    def test_file_trim_preserves_lazy_netcdf_slices(self):
+        with patch.object(NetCDFFile, '_EAGER_DATA_LIMIT_BYTES', 1):
+            table_list = TableList()
+            tables, warnings = table_list.load_tables_from_files([self.path])
+
+        self.assertFalse(warnings)
+        cube_index = next(
+            index for index, table in enumerate(tables)
+            if table.nickname == 'cube [component=u]'
+        )
+        transformed, _indices, trimmed, static = transform_file_tables(
+            table_list,
+            cube_index,
+            '_trimmed',
+            'trim(start=1, stop=2)',
+        )
+
+        self.assertEqual(trimmed, 4)
+        self.assertEqual(static, 1)
+        cube_u = next(
+            table for table in transformed
+            if table.nickname == 'cube [component=u]_trimmed'
+        )
+        values, _is_string, _is_date, _series = cube_u.getColumn(2)
+        np.testing.assert_array_equal(values, [4.0, 8.0])
 
     def test_large_2d_variable_loads_plot_columns_on_demand(self):
         with patch.object(NetCDFFile, '_EAGER_DATA_LIMIT_BYTES', 1):

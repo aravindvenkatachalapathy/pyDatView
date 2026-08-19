@@ -47,9 +47,13 @@ from pydatview.qt_math import (
     _MATH_AST_NODES,
     _MATH_CONSTANTS,
     _MATH_FUNCTIONS,
+    _TABLE_TRANSFORMS,
     _column_array,
     _resolve_expression_column,
     evaluate_math_expression,
+    evaluate_table_script,
+    transform_file_tables,
+    trim_rows,
 )
 from pydatview.qt_plot import (
     NumericAxisItem,

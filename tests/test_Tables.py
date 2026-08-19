@@ -111,6 +111,28 @@ class TestTable(unittest.TestCase):
         np.testing.assert_almost_equal(tab.data.values[:,3],[10])
         np.testing.assert_equal(tab.columns.tolist(), ['Index','om [rpm]', 'F [kN]', 'angle_[deg]'])
 
+    def test_transformed_table_preserves_native_plot_rows(self):
+        source = Table(data=pd.DataFrame({
+            'Time_[s]': np.arange(5.0),
+            'Signal': np.full(5, np.nan),
+        }))
+        source._native_plot_matrix = np.arange(10.0).reshape(5, 2)
+        source._native_plot_column_offset = 1
+        source._native_plot_backend = 'test native'
+        data = source.data.iloc[[1, 3]].copy().reset_index(drop=True)
+        data['Index'] = np.arange(len(data))
+
+        transformed = source.transformed(
+            data,
+            'trimmed',
+            row_positions=np.array([1, 3]),
+        )
+
+        values, is_string, is_date, _series = transformed.getColumn(2)
+        np.testing.assert_array_equal(values, [3.0, 7.0])
+        self.assertFalse(is_string)
+        self.assertFalse(is_date)
+
     def test_renameColumns(self):
         tab = Table.createDummy(n=3, columns=['RtFldCp [-]','B1FldFx [N]', 'angle [rad]'])
         tab.renameColumns(strReplDict={'Aero':'Fld'})

@@ -7,6 +7,25 @@ from pydatview.common import no_unit, ellude_common, getDt, exception2string, Py
 import pydatview.io as weio # File Formats and File Readers
 from pydatview.formulae import evalFormula
 
+
+class _NativePlotMatrixRowView(object):
+    """Row-selected view that preserves an on-demand plot-data backend."""
+
+    ndim = 2
+
+    def __init__(self, matrix, row_positions):
+        self.matrix = matrix
+        self.row_positions = np.asarray(row_positions, dtype=int)
+        self.shape = (len(self.row_positions), matrix.shape[1])
+
+    def __getitem__(self, key):
+        if not isinstance(key, tuple) or len(key) != 2:
+            raise IndexError('Native plot data requires row and column indices')
+        row_selector, column_selector = key
+        values = self.matrix[self.row_positions, column_selector]
+        return values[row_selector]
+
+
 # --------------------------------------------------------------------------------}
 # --- TabList 
 # --------------------------------------------------------------------------------{
@@ -651,6 +670,30 @@ class Table(object):
         self._native_plot_column_offset = 0
         self._native_plot_backend = ''
         self._native_plot_logged = False
+
+    def transformed(self, data, name, row_positions=None):
+        """Create a derived table while retaining lazy native plot data."""
+        transformed = Table(
+            data=data,
+            name=name,
+            filename=self.filename,
+            fileformat=self.fileformat,
+            dayfirst=False,
+            fileobject=None,
+        )
+        transformed.fileobject = self.fileobject
+        transformed.source_metadata = dict(self.source_metadata)
+        transformed.formulas = [dict(formula) for formula in self.formulas]
+        if self._native_plot_matrix is not None and row_positions is not None:
+            transformed._native_plot_matrix = _NativePlotMatrixRowView(
+                self._native_plot_matrix,
+                row_positions,
+            )
+            transformed._native_plot_column_offset = (
+                self._native_plot_column_offset
+            )
+            transformed._native_plot_backend = self._native_plot_backend
+        return transformed
 
     def transpose(self):
         # Not done smartly, likely to duplicate memory..
