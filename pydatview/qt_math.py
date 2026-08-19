@@ -7,6 +7,44 @@ import numpy as np
 
 from pydatview.common import no_unit
 
+
+def moving_average(x, window):
+    x = np.asarray(x, dtype=float)
+    window = int(window)
+
+    if window < 1:
+        raise ValueError("Moving-average window must be >= 1")
+
+    if window > len(x):
+        raise ValueError(
+            "Moving-average window ({}) is larger than data length ({})".format(
+                window, len(x)
+            )
+        )
+
+    kernel = np.ones(window, dtype=float) / window
+
+    return np.convolve(x, kernel, mode="same")
+
+def root_mean_square(x, window):
+    x = np.asarray(x, dtype=float)
+    window = int(window)
+
+    if window < 1:
+        raise ValueError("RMS window must be >= 1")
+
+    if window > len(x):
+        raise ValueError(
+            "RMS window ({}) is larger than data length ({})".format(
+                window, len(x)
+            )
+        )
+
+    kernel = np.ones(window, dtype=float) / window
+
+    return np.sqrt(np.convolve(x**2, kernel, mode="same"))
+
+
 _MATH_FUNCTIONS = {
     "abs": np.abs,
     "sqrt": np.sqrt,
@@ -28,6 +66,8 @@ _MATH_FUNCTIONS = {
     "radians": np.radians,
     "mean": np.mean,
     "std": np.std,
+    "moving_average": moving_average,
+    "root_mean_square": root_mean_square,
 }
 _MATH_CONSTANTS = {"pi": np.pi, "e": np.e}
 _MATH_AST_NODES = (

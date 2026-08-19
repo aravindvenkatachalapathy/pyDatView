@@ -1,205 +1,846 @@
+import os
 import numpy as np
 import pandas as pd
-import os
+
 try:
-    from .file import File, WrongFormatError, BrokenFormatError
-except:
+    from .file import (
+        File,
+        WrongFormatError,
+        BrokenFormatError,
+        OptionalImportError,
+    )
+except ImportError:
     File = dict
-    class WrongFormatError(Exception): pass
-    class BrokenFormatError(Exception): pass
+
+    class WrongFormatError(Exception):
+        pass
+
+    class BrokenFormatError(Exception):
+        pass
+
+    class OptionalImportError(Exception):
+        pass
+
 
 # --------------------------------------------------------------------------------}
-# --- OUT FILE 
+# --- FLEX low-level reader
 # --------------------------------------------------------------------------------{
+
+def split_off_by_pattern(fid, pattern=b"\xff\xff\xff\xff", limit=2):
+    found = 0
+    read = dict()
+    eof = False
+
+    while (found < limit or limit == -1) and not eof:
+        iread = read.setdefault(found, b"")
+        current = fid.read(1)
+        iread += current
+        read[found] = iread
+
+        ifound = pattern in iread
+        if ifound:
+            found += 1
+
+        eof = current == b""
+
+    return read
+
+
+def ReadReflex(
+    filename,
+    dtype=np.float32,
+    return_rescaled=True,
+    ensure_time_in_data=True,
+):
+    """
+    Read a Senvion/FLEX binary result file.
+
+    Parameters
+    ----------
+    filename : str
+        FLEX .res/.int file.
+    dtype : numpy dtype
+        Output floating-point dtype.
+    return_rescaled : bool
+        If True, return physical values.
+        If False, return raw uint16-derived values together with
+        scale and offset.
+    ensure_time_in_data : bool
+        If True and Tsim is missing, append a reconstructed Tsim channel.
+
+    Returns
+    -------
+    data
+    scale
+    offset
+    SensorNames
+    SensorUnits
+    SensorIDs
+    SensorStatus
+    time_info
+    """
+
+    with open(filename, "rb") as fid:
+
+        # -----------------------------------------------------------------
+        # Header
+        # -----------------------------------------------------------------
+        head = split_off_by_pattern(fid)
+
+        # Example: 8620, often related to the following block length.
+        other1 = np.fromfile(
+            fid,
+            dtype=np.int32,
+            count=1,
+        )
+
+        value = np.fromfile(
+            fid,
+            dtype=np.int32,
+            count=1,
+        )
+
+        if len(value) != 1:
+            raise BrokenFormatError(
+                "Could not read number of FLEX sensors from '{}'.".format(
+                    filename
+                )
+            )
+
+        nSensors = abs(int(value[0]))
+
+        if nSensors <= 0:
+            raise BrokenFormatError(
+                "Invalid number of FLEX sensors: {}".format(nSensors)
+            )
+
+        # -----------------------------------------------------------------
+        # Sensor IDs
+        # -----------------------------------------------------------------
+        SensorIDs = np.fromfile(
+            fid,
+            dtype=np.int32,
+            count=nSensors,
+        )
+
+        if len(SensorIDs) != nSensors:
+            raise BrokenFormatError(
+                "Expected {} FLEX sensor IDs, found {}.".format(
+                    nSensors,
+                    len(SensorIDs),
+                )
+            )
+
+        # -----------------------------------------------------------------
+        # Number of time samples
+        # -----------------------------------------------------------------
+        value = np.fromfile(
+            fid,
+            dtype=np.int32,
+            count=1,
+        )
+
+        if len(value) != 1:
+            raise BrokenFormatError(
+                "Could not read number of FLEX time steps."
+            )
+
+        nTimeSteps = int(value[0])
+
+        if nTimeSteps <= 0:
+            raise BrokenFormatError(
+                "Invalid number of FLEX time steps: {}".format(
+                    nTimeSteps
+                )
+            )
+
+        # Additional/header information.
+        other2 = np.fromfile(
+            fid,
+            dtype=np.int32,
+            count=1,
+        )
+
+        # -----------------------------------------------------------------
+        # Sensor names
+        # -----------------------------------------------------------------
+        value = np.fromfile(
+            fid,
+            dtype=np.int32,
+            count=1,
+        )
+
+        if len(value) != 1:
+            raise BrokenFormatError(
+                "Could not read FLEX sensor-name block length."
+            )
+
+        lenNames = int(value[0])
+
+        raw_names = (
+            fid.read(lenNames)
+            .strip(b"\x00")
+            .split(b"\x00")
+        )
+
+        SensorNames = [
+            item.decode("cp1252")
+            for item in raw_names
+        ]
+
+        # -----------------------------------------------------------------
+        # Sensor units
+        # -----------------------------------------------------------------
+        value = np.fromfile(
+            fid,
+            dtype=np.int32,
+            count=1,
+        )
+
+        if len(value) != 1:
+            raise BrokenFormatError(
+                "Could not read FLEX unit block length."
+            )
+
+        lenUnits = int(value[0])
+
+        raw_units = (
+            fid.read(lenUnits)
+            .strip(b"\x00")
+            .split(b"\x00")
+        )
+
+        SensorUnits = [
+            item.decode("cp1252")
+            for item in raw_units
+        ]
+
+        # -----------------------------------------------------------------
+        # Sensor status
+        # -----------------------------------------------------------------
+        value = np.fromfile(
+            fid,
+            dtype=np.int32,
+            count=1,
+        )
+
+        if len(value) != 1:
+            raise BrokenFormatError(
+                "Could not read FLEX status block length."
+            )
+
+        lenStatus = int(value[0])
+
+        raw_status = (
+            fid.read(lenStatus)
+            .strip(b"\x00")
+            .split(b"\x00")
+        )
+
+        # Decode the status values as well.
+        SensorStatus = [
+            item.decode("cp1252")
+            for item in raw_status
+        ]
+
+        # -----------------------------------------------------------------
+        # Time information
+        # -----------------------------------------------------------------
+        other3 = np.fromfile(
+            fid,
+            dtype=np.int32,
+            count=1,
+        )
+
+        time_values = np.fromfile(
+            fid,
+            dtype=np.float32,
+            count=2,
+        )
+
+        if len(time_values) != 2:
+            raise BrokenFormatError(
+                "Could not read FLEX start time and time step."
+            )
+
+        time_start = float(time_values[0])
+        time_step = float(time_values[1])
+
+        time_info = {
+            "start": time_start,
+            "step": time_step,
+            "number": nTimeSteps,
+        }
+
+        # -----------------------------------------------------------------
+        # Data block
+        #
+        # At the end of the file:
+        #
+        #   offset : float32[nSensors]
+        #   scale  : float32[nSensors]
+        #   data   : uint16[nSensors * nTimeSteps]
+        #
+        # Each sensor therefore occupies:
+        #
+        #   8 bytes
+        #
+        # for offset + scale and:
+        #
+        #   2*nTimeSteps bytes
+        #
+        # for uint16 data.
+        # -----------------------------------------------------------------
+        bytes_from_end = nSensors * (
+            8 + 2 * nTimeSteps
+        )
+
+        fid.seek(
+            -bytes_from_end,
+            os.SEEK_END,
+        )
+
+        offset = np.fromfile(
+            fid,
+            dtype=np.float32,
+            count=nSensors,
+        )
+
+        scale = np.fromfile(
+            fid,
+            dtype=np.float32,
+            count=nSensors,
+        )
+
+        if len(offset) != nSensors:
+            raise BrokenFormatError(
+                "Could not read FLEX offset array."
+            )
+
+        if len(scale) != nSensors:
+            raise BrokenFormatError(
+                "Could not read FLEX scale array."
+            )
+
+        offset = (
+            offset
+            .astype(dtype)
+            .reshape(1, -1)
+        )
+
+        scale = (
+            scale
+            .astype(dtype)
+            .reshape(1, -1)
+        )
+
+        # -----------------------------------------------------------------
+        # Raw data
+        # -----------------------------------------------------------------
+        expected_values = nSensors * nTimeSteps
+
+        raw_data = np.fromfile(
+            fid,
+            dtype=np.uint16,
+            count=expected_values,
+        )
+
+        if raw_data.size != expected_values:
+            raise BrokenFormatError(
+                "FLEX data size mismatch in '{}'. "
+                "Expected {} values, found {}.".format(
+                    filename,
+                    expected_values,
+                    raw_data.size,
+                )
+            )
+
+        data = (
+            raw_data
+            .astype(dtype)
+            .reshape(nSensors, nTimeSteps)
+            .T
+        )
+
+    # ---------------------------------------------------------------------
+    # Validate metadata
+    # ---------------------------------------------------------------------
+    if len(SensorNames) != nSensors:
+        raise BrokenFormatError(
+            "FLEX sensor-name count mismatch: "
+            "{} names for {} sensors.".format(
+                len(SensorNames),
+                nSensors,
+            )
+        )
+
+    if len(SensorUnits) != nSensors:
+        raise BrokenFormatError(
+            "FLEX sensor-unit count mismatch: "
+            "{} units for {} sensors.".format(
+                len(SensorUnits),
+                nSensors,
+            )
+        )
+
+    if len(SensorStatus) != nSensors:
+        raise BrokenFormatError(
+            "FLEX sensor-status count mismatch: "
+            "{} status values for {} sensors.".format(
+                len(SensorStatus),
+                nSensors,
+            )
+        )
+
+    # ---------------------------------------------------------------------
+    # Add reconstructed Tsim when requested
+    # ---------------------------------------------------------------------
+    if ensure_time_in_data:
+
+        if "Tsim" not in SensorNames:
+
+            SensorNames.append("Tsim")
+            SensorIDs = np.append(
+                SensorIDs,
+                99999,
+            )
+            SensorUnits.append("s")
+            SensorStatus.append("Time")
+
+            index = np.arange(
+                nTimeSteps,
+                dtype=dtype,
+            ).reshape(-1, 1)
+
+            data = np.append(
+                data,
+                index,
+                axis=1,
+            )
+
+            scale = np.append(
+                scale,
+                [[time_step]],
+                axis=1,
+            )
+
+            offset = np.append(
+                offset,
+                [[time_start]],
+                axis=1,
+            )
+
+    # ---------------------------------------------------------------------
+    # Convert raw values to physical quantities
+    #
+    #     physical = raw * scale + offset
+    # ---------------------------------------------------------------------
+    if return_rescaled:
+        data = data * scale + offset
+
+    return (
+        data,
+        scale,
+        offset,
+        SensorNames,
+        SensorUnits,
+        SensorIDs,
+        SensorStatus,
+        time_info,
+    )
+
+
+# --------------------------------------------------------------------------------}
+# --- FLEX / Senvion output file
+# --------------------------------------------------------------------------------{
+
 class FLEXOutFile(File):
 
     @staticmethod
     def defaultExtensions():
-        return ['.res','.int']
+        return [".res", ".int"]
 
     @staticmethod
     def formatName():
-        return 'FLEX output file'
+        return "FLEX output file"
 
-    def _read(self):
-        # --- First read the binary file
-        dtype=np.float32; # Flex internal data is stored in single precision
+    def _read(self, **kwargs):
+        """
+        Read FLEX / Senvion binary output.
+
+        Raw FLEX data are stored internally together with scale and offset.
+        pyDatView receives physical values in _toDataFrame().
+        """
+
+        dtype = kwargs.pop(
+            "dtype",
+            np.float32,
+        )
+
+        output_time_name = kwargs.pop(
+            "output_time_name",
+            "Time",
+        )
+
+        # We handle reconstructed time ourselves below.
+        ensure_time_in_data = kwargs.pop(
+            "ensure_time_in_data",
+            False,
+        )
+
         try:
-            self.data,self.tmin,self.dt,self.Version,self.DateID,self.title=read_flex_res(self.filename, dtype=dtype)
-        except WrongFormatError as e:    
-            raise WrongFormatError('FLEX File {}: '.format(self.filename)+'\n'+e.args[0])
-        self.nt       = np.size(self.data,0)
-        self.nSensors = np.size(self.data,1)
-        self.time = np.arange(self.tmin, self.tmin +  self.nt * self.dt, self.dt).reshape(self.nt,1).astype(dtype)
+            (
+                data,
+                scale,
+                offset,
+                names,
+                units,
+                IDs,
+                status,
+                time_info,
+            ) = ReadReflex(
+                self.filename,
+                dtype=dtype,
+                return_rescaled=False,
+                ensure_time_in_data=ensure_time_in_data,
+            )
 
-        # --- Then the sensor file
-        parentdir = os.path.dirname(self.filename)
-        basename = os.path.splitext(os.path.basename(self.filename))[0]
-        #print(parentdir)
-        #print(basename)
-        PossibleFiles=[]
-        PossibleFiles+=[os.path.join(parentdir, basename+'.Sensor')]
-        PossibleFiles+=[os.path.join(parentdir, 'Sensor_'+basename)]
-        PossibleFiles+=[os.path.join(parentdir, 'sensor')]
-        # We try allow for other files
-        Found =False
-        for sf in PossibleFiles:
-            if os.path.isfile(sf):
-                self.sensors=read_flex_sensor(sf)
-                if len(self.sensors['ID'])!=self.nSensors:
-                    Found = False
-                else:
-                    Found = True
-                    break
-        if not Found:
-            # we are being nice and create some fake sensors info
-            self.sensors=read_flex_sensor_fake(self.nSensors)
+        except WrongFormatError:
+            raise
 
-        if len(self.sensors['ID'])!=self.nSensors:
-            raise BrokenFormatError('Inconsistent number of sensors: {} (sensor file) {} (out file), for file: {}'.format(len(self.sensors['ID']),self.nSensors,self.filename))
+        except BrokenFormatError:
+            raise
 
-    #def _write(self): # TODO
-    #    pass
+        except Exception as error:
+            raise BrokenFormatError(
+                "Could not read FLEX/Senvion file '{}':\n{}".format(
+                    self.filename,
+                    error,
+                )
+            ) from error
 
-    def __repr__(self):
-        return 'Flex Out File: {}\nVersion:{} - DateID:{} - Title:{}\nSize:{}x{} - tmin:{} - dt:{}]\nSensors:{}'.format(self.filename,self.Version,self.DateID,self.title,self.nt,self.nSensors,self.tmin,self.dt,self.sensors['Name'])
+        # -----------------------------------------------------------------
+        # Store raw FLEX information
+        # -----------------------------------------------------------------
+        self.data = np.asarray(data)
+        self.scale = np.asarray(scale)
+        self.offset = np.asarray(offset)
 
-    def _toDataFrame(self):
-        # Appending time to form the dataframe
-        names = ['Time'] + self.sensors['Name']
-        units = ['s']    + self.sensors['Unit']
-        units = [u.replace('(','').replace(')','').replace('[','').replace(']','') for u in units]
-        data  = np.concatenate((self.time, self.data), axis=1)
-        cols=[n+'_['+u+']' for n,u in zip(names,units)]
-        return pd.DataFrame(data=data,columns=cols)
+        self.time_info = time_info
 
-# --------------------------------------------------------------------------------}
-# --- Helper Functions 
-# --------------------------------------------------------------------------------{
-def read_flex_res(filename, dtype=np.float32):
-    # Read flex file
-    with open(filename,'rb') as fid:
-        #_ = struct.unpack('i', fid.read(4)) # Dummy
-        _ = np.fromfile(fid, 'int32', 1) # Dummy
-        # --- Trying to get DateID
-        fid.seek(4) # 
-        DateID=np.fromfile(fid, 'int32', 6)
-        if DateID[0]<32 and DateID[1]<13 and DateID[3]<25 and DateID[4]<61:
-            # OK, DateID was present
-            title  = fid.read(40).strip()
+        if self.data.ndim != 2:
+            raise BrokenFormatError(
+                "Expected a 2-D FLEX data array, "
+                "received shape {} for file '{}'.".format(
+                    self.data.shape,
+                    self.filename,
+                )
+            )
+
+        self.nt = self.data.shape[0]
+        self.nSensors = self.data.shape[1]
+
+        names = list(names)
+        units = list(units)
+        IDs = list(IDs)
+        status = list(status)
+
+        if not (
+            len(names)
+            == len(units)
+            == len(IDs)
+            == len(status)
+            == self.nSensors
+        ):
+            raise BrokenFormatError(
+                "Inconsistent FLEX channel information for '{}':\n"
+                "  data columns = {}\n"
+                "  names        = {}\n"
+                "  units        = {}\n"
+                "  IDs          = {}\n"
+                "  status       = {}".format(
+                    self.filename,
+                    self.nSensors,
+                    len(names),
+                    len(units),
+                    len(IDs),
+                    len(status),
+                )
+            )
+
+        # -----------------------------------------------------------------
+        # Time handling
+        # -----------------------------------------------------------------
+        self.time_col = "Tsim" in names
+
+        if self.time_col:
+            i_time = names.index("Tsim")
+            names[i_time] = output_time_name
+            self.time_index = i_time
         else:
-            fid.seek(4) # 
-            DateID = np.fromfile(fid, 'int32', 1)
-            title  = fid.read(60).strip()
-        _ = np.fromfile(fid, 'int32', 2) # Dummy
-        # FILE POSITION <<< fid.seek(4 * 19) 
-        nSensors = np.fromfile(fid, 'int32', 1)[0] 
-        IDs = np.fromfile(fid, 'int32', nSensors)
-        _ = np.fromfile(fid, 'int32', 1) # Dummy
-        # FILE POSITION <<< fid.seek(4*nSensors+4*21)
-        Version = np.fromfile(fid, 'int32', 1)[0] 
-        # FILE POSITION <<< fid.seek(4*(nSensors)+4*22)
-        if Version == 12:
-            raise NotImplementedError('Flex out file with version 12, TODO. Implement it!')
-            # TODO
-            #fseek(o.fid,4*(21+o.nSensors),-1);% seek to the data from beginning of file
-            #RL=o.nSensors+5; % calculate the length of each row
-            #A = fread(o.fid,[RL,inf],'single'); % read whole file
-            #t=A(2,:);% time vector contained in row 2
-            #o.SensorData=A(5:end,:);
-            # save relevant information 
-            #o.tmin = t(1)     ;
-            #o.dt   = t(2)-t(1);
-            #o.t    = t        ;
-            #o.nt   = length(t);
-        elif Version in [0,2,3]:
-            tmin = np.fromfile(fid, 'f', 1)[0] # Dummy
-            dt = np.fromfile(fid, 'f', 1)[0] # Dummy
-            scale_factors = np.fromfile(fid, 'f', nSensors).astype(dtype)
-        # --- Reading Time series
-        # FILE POSITION <<< fid.seek(8*nSensors + 48*2)
-        data = np.fromfile(fid, 'int16').astype(dtype) #data = np.fromstring(fid.read(), 'int16').astype(dtype)
-        nt   = int(len(data) / nSensors)
+            self.time_index = None
+
+        self.sensors = {
+            "Name": names,
+            "Unit": units,
+            "ID": IDs,
+            "Status": status,
+        }
+
+        # -----------------------------------------------------------------
+        # Reconstruct time if Tsim does not exist
+        # -----------------------------------------------------------------
+        if not self.time_col:
+            try:
+                t_start = float(
+                    time_info["start"]
+                )
+                t_step = float(
+                    time_info["step"]
+                )
+
+            except (
+                KeyError,
+                TypeError,
+                ValueError,
+            ) as error:
+
+                raise BrokenFormatError(
+                    "FLEX file '{}' contains no Tsim channel and valid "
+                    "time_info['start']/time_info['step'] could not "
+                    "be found.".format(
+                        self.filename
+                    )
+                ) from error
+
+            self.time = (
+                t_start
+                + t_step
+                * np.arange(
+                    self.nt,
+                    dtype=np.float64,
+                )
+            )
+
+        else:
+            self.time = None
+
+    # -------------------------------------------------------------------------
+    # Scaling
+    # -------------------------------------------------------------------------
+    def _rescaled_data(self):
+        """
+        Convert raw FLEX values to physical values.
+
+            physical = raw * scale + offset
+        """
+
         try:
-            if Version ==3:
-                data = data.reshape(nSensors, nt).transpose()
+            return (
+                self.data
+                * self.scale
+                + self.offset
+            )
+
+        except ValueError as error:
+            raise BrokenFormatError(
+                "Cannot apply FLEX scaling:\n"
+                "  data shape   = {}\n"
+                "  scale shape  = {}\n"
+                "  offset shape = {}".format(
+                    self.data.shape,
+                    self.scale.shape,
+                    self.offset.shape,
+                )
+            ) from error
+
+    # -------------------------------------------------------------------------
+    # Representation
+    # -------------------------------------------------------------------------
+    def __repr__(self):
+
+        s = []
+
+        s.append(
+            "FLEX / Senvion output file"
+        )
+
+        s.append(
+            "Filename: {}".format(
+                self.filename
+            )
+        )
+
+        s.append(
+            "Samples: {}".format(
+                self.nt
+            )
+        )
+
+        s.append(
+            "Channels: {}".format(
+                self.nSensors
+            )
+        )
+
+        s.append(
+            "Explicit time channel: {}".format(
+                self.time_col
+            )
+        )
+
+        if (
+            not self.time_col
+            and self.time_info is not None
+        ):
+            s.append(
+                "Time info: {}".format(
+                    self.time_info
+                )
+            )
+
+        return "\n".join(s)
+
+    # -------------------------------------------------------------------------
+    # pyDatView DataFrame
+    # -------------------------------------------------------------------------
+    def _toDataFrame(self):
+        """
+        Return FLEX data in pyDatView format.
+
+        Normal channels are:
+
+            Name_[unit]
+
+        The FLEX sensor ID is only added if two channels would otherwise
+        have identical names.
+        """
+
+        data = self._rescaled_data()
+
+        names = list(
+            self.sensors["Name"]
+        )
+
+        units = list(
+            self.sensors["Unit"]
+        )
+
+        IDs = list(
+            self.sensors["ID"]
+        )
+
+        clean_units = [
+            str(unit)
+            .replace("(", "")
+            .replace(")", "")
+            .replace("[", "")
+            .replace("]", "")
+            .strip()
+            for unit in units
+        ]
+
+        # -----------------------------------------------------------------
+        # Construct clean base names
+        # -----------------------------------------------------------------
+        base_columns = []
+
+        for i, (name, unit) in enumerate(
+            zip(names, clean_units)
+        ):
+
+            if (
+                self.time_col
+                and i == self.time_index
+            ):
+                base_columns.append(
+                    "Time_[s]"
+                )
+
             else:
-                data = data.reshape(nt, nSensors)
-        except ValueError:
-            raise WrongFormatError("Flat data length {} is not compatible with {}x{} (nt x nSensors)".format(len(data),nt,nSensors))
-        for i in range(nSensors):
-            data[:, i] *= scale_factors[i]
+                base_columns.append(
+                    "{}_[{}]".format(
+                        name,
+                        unit,
+                    )
+                )
 
-        return (data,tmin,dt,Version,DateID,title)
+        # Count duplicate names.
+        counts = {}
 
+        for column in base_columns:
+            counts[column] = (
+                counts.get(column, 0) + 1
+            )
 
-def read_flex_sensor(sensor_file):
-    with open(sensor_file, 'r') as fid:
-        sensor_info_lines = fid.readlines()[2:]
-    sensor_info = []
-    d=dict({ 'ID':[],'Gain':[],'Offset':[],'Unit':[],'Name':[],'Description':[]});
-    for line in sensor_info_lines:
-        line   = line.strip().split()
-        d['ID']          .append(int(line[0]))
-        d['Gain']        .append(float(line[1]))
-        d['Offset']      .append(float(line[2]))
-        d['Unit']        .append(line[5])
-        d['Name']        .append(line[6])
-        d['Description'] .append(' '.join(line[7:]))
-    return d
- 
-def read_flex_sensor_fake(nSensors):
-    d=dict({ 'ID':[],'Gain':[],'Offset':[],'Unit':[],'Name':[],'Description':[]});
-    for i in range(nSensors):
-        d['ID']          .append(i+1)
-        d['Gain']        .append(1.0)
-        d['Offset']      .append(0.0)
-        d['Unit']        .append('(NA)')
-        d['Name']        .append('S{:04d}'.format(i+1))
-        d['Description'] .append('NA')
-    return d
+        # -----------------------------------------------------------------
+        # Add FLEX ID only if needed to resolve duplicates
+        # -----------------------------------------------------------------
+        sensor_columns = []
 
+        for i, (
+            name,
+            sensor_id,
+            unit,
+            base,
+        ) in enumerate(
+            zip(
+                names,
+                IDs,
+                clean_units,
+                base_columns,
+            )
+        ):
 
+            if (
+                self.time_col
+                and i == self.time_index
+            ):
+                sensor_columns.append(
+                    "Time_[s]"
+                )
 
+            elif counts[base] == 1:
+                sensor_columns.append(
+                    base
+                )
 
+            else:
+                sensor_columns.append(
+                    "{}_{}_[{}]".format(
+                        name,
+                        sensor_id,
+                        unit,
+                    )
+                )
 
+        # -----------------------------------------------------------------
+        # Explicit Tsim exists
+        # -----------------------------------------------------------------
+        if self.time_col:
 
-# def write_flex_file(filename,data,tmin,dt):
-#     ds = dataset
-#     # Write int data file
-#     f = open(filename, 'wb')
-#     f.write(struct.pack('ii', 0, 0))  # 2x empty int
-#     title = ("%-60s" % str(ds.name)).encode()
-#     f.write(struct.pack('60s', title))  # title
-#     f.write(struct.pack('ii', 0, 0))  # 2x empty int
-#     ns = len(sensors)
-#     f.write(struct.pack('i', ns))
-#     f.write(struct.pack('i' * ns, *range(1, ns + 1)))  # sensor number
-#     f.write(struct.pack('ii', 0, 0))  # 2x empty int
-#     time = ds.basis_attribute()
-#     f.write(struct.pack('ff', time[0], time[1] - time[0]))  # start time and time step
-# 
-#     scale_factors = np.max(np.abs(data), 0) / 32000
-#     f.write(struct.pack('f' * len(scale_factors), *scale_factors))
-#     # avoid dividing by zero
-#     not0 = np.where(scale_factors != 0)
-#     data[:, not0] /= scale_factors[not0]
-#     #flatten and round
-#     data = np.round(data.flatten()).astype(np.int16)
-#     f.write(struct.pack('h' * len(data), *data.tolist()))
-#     f.close()
-# 
-#     # write sensor file
-#     f = open(os.path.join(os.path.dirname(filename), 'sensor'), 'w')
-#     f.write("Sensor list for %s\n" % filename)
-#     f.write(" No   forst  offset  korr. c  Volt    Unit   Navn    Beskrivelse------------\n")
-#     sensorlineformat = "%3s  %.3f   %.3f      1.00     0.00 %7s %-8s %s\n"
-# 
-#     if isinstance(ds, FLEX4Dataset):
-#         gains = np.r_[ds.gains[1:], np.ones(ds.shape[1] - len(ds.gains))]
-#         offsets = np.r_[ds.offsets[1:], np.zeros(ds.shape[1] - len(ds.offsets))]
-#         sensorlines = [sensorlineformat % ((nr + 1), gain, offset, att.unit[:7], att.name.replace(" ", "_")[:8], att.description[:512]) for nr, att, gain, offset in zip(range(ns), sensors, gains, offsets)]
-#     else:
-#         sensorlines = [sensorlineformat % ((nr + 1), 1, 0, att.unit[:7], att.name.replace(" ", "_")[:8], att.description[:512]) for nr, att in enumerate(sensors)]
-#     f.writelines(sensorlines)
-#     f.close()
+            return pd.DataFrame(
+                data=data,
+                columns=sensor_columns,
+            )
+
+        # -----------------------------------------------------------------
+        # No Tsim:
+        # prepend reconstructed time
+        # -----------------------------------------------------------------
+        columns = (
+            ["Time_[s]"]
+            + sensor_columns
+        )
+
+        table_data = np.column_stack(
+            (
+                self.time,
+                data,
+            )
+        )
+
+        return pd.DataFrame(
+            data=table_data,
+            columns=columns,
+        )
