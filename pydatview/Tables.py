@@ -26,6 +26,31 @@ class _NativePlotMatrixRowView(object):
         return values[row_selector]
 
 
+class _ScaledPlotMatrix(object):
+    """Apply unit scales while retaining an on-demand native matrix."""
+
+    ndim = 2
+
+    def __init__(self, matrix):
+        self.matrix = matrix
+        self.shape = matrix.shape
+        self.scales = np.ones(matrix.shape[1], dtype=float)
+
+    def multiply_scales(self, updates):
+        for column_index, scale in updates:
+            self.scales[column_index] *= scale
+
+    def __getitem__(self, key):
+        if not isinstance(key, tuple) or len(key) != 2:
+            raise IndexError('Native plot data requires row and column indices')
+        row_selector, column_selector = key
+        values = self.matrix[row_selector, column_selector]
+        scale = self.scales[int(column_selector)]
+        if scale == 1.0:
+            return values
+        return values * scale
+
+
 # --------------------------------------------------------------------------------}
 # --- TabList 
 # --------------------------------------------------------------------------------{
@@ -876,12 +901,33 @@ class Table(object):
         plan = data.get('plan')
         if plan is None:
             plan = unitConversionPlan(self.data.columns, data['flavor'])
+        renamed, conversions = plan
+        lazy_native = (
+            self._native_plot_matrix is not None
+            and self.source_metadata.get('lazy_values', False)
+        )
+        native_conversions = []
+        materialized_conversions = []
+        if lazy_native:
+            for column_index, scale in conversions:
+                native_index = column_index - self._native_plot_column_offset
+                if 0 <= native_index < self._native_plot_matrix.shape[1]:
+                    native_conversions.append((native_index, scale))
+                else:
+                    materialized_conversions.append((column_index, scale))
+            plan = (renamed, materialized_conversions)
         changeUnits(
             self.data,
             flavor=data['flavor'],
             plan=plan,
         )
-        if plan[1]:
+        if native_conversions:
+            if not isinstance(self._native_plot_matrix, _ScaledPlotMatrix):
+                self._native_plot_matrix = _ScaledPlotMatrix(
+                    self._native_plot_matrix
+                )
+            self._native_plot_matrix.multiply_scales(native_conversions)
+        elif conversions and not lazy_native:
             self._invalidateNativePlotData()
 
     def convertTimeColumns(self, dayfirst=False):

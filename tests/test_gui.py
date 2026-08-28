@@ -807,6 +807,46 @@ class TestGUI(unittest.TestCase):
             window.close()
             self.app.processEvents()
 
+    def test_unload_releases_tables_but_keeps_scan_entries(self):
+        from pydatview.Tables import Table
+        from pydatview.qt_main import MainWindow
+
+        window = MainWindow()
+        path = os.path.abspath("large.outb")
+        file_format = SimpleNamespace(name="FAST output file")
+        window.set_lazy_file_index([(path, file_format)])
+        table = Table(
+            data=pd.DataFrame({
+                "Time [s]": [0.0, 1.0],
+                "Load [N]": [1.0, 2.0],
+            }),
+            name="large",
+            filename=path,
+        )
+        window.tab_list.append(table)
+        entry = window.lazy_entries[0]
+        entry.table_indices = [0]
+        entry.full_loaded = True
+        entry.loaded_column_indices = {0, 1}
+        window.lazy_loaded_total = 1
+        window.populate_tables()
+
+        window.unload_selected_sources(window.selector_panes[0])
+
+        self.assertEqual(len(window.lazy_entries), 1)
+        self.assertEqual(len(window.tab_list), 0)
+        self.assertFalse(entry.loaded)
+        self.assertFalse(entry.full_loaded)
+        self.assertEqual(window.lazy_loaded_count(), 0)
+        self.assertEqual(window.selected_lazy_indices(), [0])
+        self.assertEqual(
+            window.selector_panes[0].y_list_widget.selectedItems(),
+            [],
+        )
+        self.assertFalse(window.redraw_timer.isActive())
+        window.close()
+        self.app.processEvents()
+
     def test_add_after_scan_appends_and_queues_without_resetting_index(self):
         from unittest.mock import patch
 
@@ -870,6 +910,26 @@ class TestGUI(unittest.TestCase):
         window.bladed_worker_cap = 2
 
         self.assertEqual(window.effective_lazy_worker_limit(), 2)
+        window.close()
+        self.app.processEvents()
+
+    def test_fast_memory_reservation_scales_with_selected_channels(self):
+        from pydatview.qt_main import LazyFileEntry, MainWindow
+
+        window = MainWindow()
+        entry = LazyFileEntry(
+            "large.outb",
+            SimpleNamespace(name="FAST output file"),
+            columns=["Channel {}".format(index) for index in range(100)],
+            estimated_load_bytes=8 * 1024 ** 3,
+        )
+
+        selected = window.estimate_lazy_load_bytes(
+            entry,
+            channel_indices=[0, 1],
+        )
+
+        self.assertEqual(selected, int(8 * 1024 ** 3 * 0.02))
         window.close()
         self.app.processEvents()
 

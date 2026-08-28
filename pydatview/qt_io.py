@@ -333,6 +333,18 @@ def scan_readable_file_matches(folder, format_entries, recursive=True, bladed_su
             continue
     return sorted(matches, key=lambda item: item[0])
 
+
+def match_file_format(filename, file_formats):
+    """Match a known format by extension without opening the data file."""
+    entries = [
+        (file_format, _format_specs(file_format))
+        for file_format in file_formats
+    ]
+    return _match_indexed_format(
+        os.path.basename(filename),
+        _indexed_format_entries(entries),
+    )
+
 def _default_lazy_workers():
     cpu_count = max(1, os.cpu_count() or 1)
     env_value = os.environ.get("PYDATVIEW_MAX_WORKERS")
@@ -341,6 +353,15 @@ def _default_lazy_workers():
             return max(1, min(cpu_count, int(env_value)))
         except ValueError:
             print("[pyDatView] Ignoring invalid PYDATVIEW_MAX_WORKERS={!r}".format(env_value))
+    try:
+        import psutil
+        total_memory = int(psutil.virtual_memory().total)
+        if total_memory <= 24 * 1024 ** 3:
+            return 1
+        if total_memory <= 48 * 1024 ** 3:
+            return min(cpu_count, 2)
+    except Exception:
+        pass
     if sys.platform.startswith("win"):
         return min(cpu_count, 8)
     return min(cpu_count, 32)

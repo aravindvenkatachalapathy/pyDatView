@@ -16,6 +16,51 @@ except:
     class WrongFormatError(Exception): pass
     class BrokenFormatError(Exception): pass
 
+
+class _BladedLazyMatrix:
+    """Column-oriented memory-mapped view of a binary Bladed dataset."""
+
+    ndim = 2
+
+    def __init__(self, filename, sensor_info):
+        self.filename = filename
+        self.dtype = np.dtype(sensor_info['Precision'])
+        self.n_sections = int(sensor_info['nSections'])
+        self.n_sensors = int(sensor_info['nSensors'])
+        self.n_major = int(sensor_info['nMajor'])
+        values_per_step = self.n_sections * self.n_sensors
+        if self.n_major == 0:
+            value_count = os.path.getsize(filename) // self.dtype.itemsize
+            self.n_major = value_count // values_per_step
+        self.shape = (self.n_major, values_per_step)
+        self._memmap = None
+
+    def _values(self):
+        if self._memmap is None:
+            self._memmap = np.memmap(
+                self.filename,
+                dtype=self.dtype,
+                mode='r',
+                shape=(self.n_major, self.n_sections, self.n_sensors),
+                order='C',
+            )
+        return self._memmap
+
+    def __getitem__(self, key):
+        if not isinstance(key, tuple) or len(key) != 2:
+            raise IndexError('Bladed lazy data requires row and column indices')
+        row_selector, column_selector = key
+        if not np.isscalar(column_selector):
+            raise IndexError('Bladed lazy data is loaded one channel at a time')
+        column_index = int(column_selector)
+        if column_index < 0 or column_index >= self.shape[1]:
+            raise IndexError('Bladed channel index is outside the dataset')
+        section_index, sensor_index = divmod(
+            column_index,
+            self.n_sensors,
+        )
+        return self._values()[row_selector, section_index, sensor_index]
+
         
 # --------------------------------------------------------------------------------}
 # --- Helper functions 
@@ -155,15 +200,7 @@ def OrgData(data, **info):
     # since some of the matrices are 3 dimensional, we want to make all 
     # to 2d matrix, so I am organizing them here:
     if info['NDIMENS'] == 3:
-        dataOut = np.zeros( (info['nMajor'],len(info['SectionList'])*len(info['ChannelName'])) ) 
-
-        col_vec = -1
-        for isec, _ in enumerate(info['SectionList']):
-            for ichan, _ in enumerate(zip(info['ChannelName'], info['ChannelUnit'])):
-                col_vec +=1
-                dataOut[:,col_vec] = data[:,isec,ichan]
-
-        data = dataOut
+        data = data.reshape(info['nMajor'], -1)
         SName, SUnit = organize_bladed_3d_columns(**info)
         info['ChannelName'] = SName
         info['ChannelUnit'] = SUnit
@@ -183,7 +220,7 @@ def read_bladed_output(sensorFilename, readTimeFilesOnly=False):
     nSensors   = sensorInfo['nSensors']
     nMajor     = sensorInfo['nMajor']
     nSections  = sensorInfo['nSections']
-    hasTime = 'MIN' and 'STEP' in sensorInfo.keys()
+    hasTime = 'MIN' in sensorInfo and 'STEP' in sensorInfo
     # --- Return if caller only wants time series
     if readTimeFilesOnly and not hasTime:
         return [], {}
@@ -338,6 +375,54 @@ class BladedFile(File):
         for i,filename in enumerate(files):
 
             dataFilename = filename.replace('%','$')
+            if is_project:
+                if not os.path.isfile(dataFilename):
+                    print('>>> Missing datafile: {}'.format(dataFilename))
+                    continue
+                info = read_bladed_sensor_file(filename)
+                has_time = 'MIN' in info and 'STEP' in info
+                if readTimeFilesOnly and not has_time:
+                    continue
+                if isBinary(dataFilename):
+                    matrix = _BladedLazyMatrix(dataFilename, info)
+                    info['nMajor'] = matrix.n_major
+                    if info['NDIMENS'] == 3:
+                        info['ChannelName'], info['ChannelUnit'] = (
+                            organize_bladed_3d_columns(**info)
+                        )
+                    category = (
+                        info.get('category')
+                        or os.path.splitext(os.path.basename(filename))[1]
+                    )
+                    dataset_name = category
+                    if dataset_name in dataSets:
+                        dataset_name = '{} ({})'.format(
+                            category,
+                            os.path.splitext(filename)[1].lstrip('.%$'),
+                        )
+                    sensors = list(info['ChannelName'])
+                    units = list(info['ChannelUnit'])
+                    dset = {
+                        'data': None,
+                        'sensors': sensors,
+                        'units': units,
+                        'name': dataset_name,
+                        '_lazy_plot_data': matrix,
+                        '_n_major': matrix.n_major,
+                    }
+                    if has_time:
+                        dset['_time'] = (
+                            np.arange(matrix.n_major, dtype=np.float64)
+                            * info['STEP']
+                            + info['MIN']
+                        )
+                        dset['sensors'].insert(0, 'Time')
+                        dset['units'].insert(0, 's')
+                        dset['_numpy_plot_column_offset'] = 2
+                    else:
+                        dset['_numpy_plot_column_offset'] = 1
+                    dataSets[dataset_name] = dset
+                    continue
             try:
                 # Call "Read_bladed_file" function to Read and store data:
                 data, info = read_bladed_output(filename, readTimeFilesOnly=readTimeFilesOnly)    
@@ -437,7 +522,26 @@ class BladedFile(File):
         dfs={}
         for k,dset in self.dataSets.items():
             BL_ChannelUnit = [ name+' ['+unit+']' for name,unit in zip(dset['sensors'],dset['units'])]
-            if '_time' in dset:
+            if '_lazy_plot_data' in dset:
+                placeholder = pd.Series(
+                    index=pd.RangeIndex(dset['_n_major']),
+                    dtype=pd.SparseDtype(dset['_lazy_plot_data'].dtype, np.nan),
+                ).array
+                start = 1 if '_time' in dset else 0
+                df = pd.DataFrame({
+                    column: placeholder
+                    for column in BL_ChannelUnit[start:]
+                })
+                if '_time' in dset:
+                    df.insert(0, BL_ChannelUnit[0], dset['_time'])
+                df.attrs['pydatview'] = {
+                    'lazy_values': True,
+                    'lazy_column_offset': dset[
+                        '_numpy_plot_column_offset'
+                    ],
+                    'source_variable': str(k),
+                }
+            elif '_time' in dset:
                 df = pd.DataFrame(data=dset['data'], columns=BL_ChannelUnit[1:])
                 df.insert(0, BL_ChannelUnit[0], dset['_time'])
             else:
@@ -456,12 +560,15 @@ class BladedFile(File):
         dset = self.dataSets.get(table_name)
         if dset is None and len(self.dataSets) == 1:
             dset = next(iter(self.dataSets.values()))
-        if dset is None or '_numpy_plot_data' not in dset:
+        if dset is None:
+            return None
+        matrix = dset.get('_lazy_plot_data', dset.get('_numpy_plot_data'))
+        if matrix is None:
             return None
         return (
-            dset['_numpy_plot_data'],
+            matrix,
             dset['_numpy_plot_column_offset'],
-            'Rust',
+            'Bladed memmap' if '_lazy_plot_data' in dset else 'Rust',
         )
     
 

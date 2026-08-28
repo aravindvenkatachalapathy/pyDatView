@@ -1,5 +1,6 @@
 """Scanning, lazy loading, and table-index workflows for the Qt window."""
 
+import gc
 import os
 import time
 from collections import deque
@@ -10,9 +11,11 @@ from pydatview.qt_io import (
     LazyFileEntry,
     LazyLoadWorker,
     _default_lazy_workers,
+    match_file_format,
     read_lazy_columns,
     scan_readable_file_matches,
 )
+from pydatview.io.load_estimates import estimate_decoded_load_bytes
 
 
 class QtLoadingMixin:
@@ -224,7 +227,58 @@ class QtLoadingMixin:
             fileformats = [ff for _, ff in pairs]
             if not filenames:
                 return None
+            resolved_pairs = [
+                (
+                    path,
+                    file_format or match_file_format(
+                        path,
+                        self.file_formats,
+                    ),
+                )
+                for path, file_format in pairs
+            ]
+            should_index_large = (
+                not self.lazy_entries
+                and (not add or len(self.tab_list) == 0)
+                and any(
+                    getattr(file_format, "name", "")
+                    in ("FAST output file", "Bladed output file")
+                    and (
+                        getattr(file_format, "name", "")
+                        == "Bladed output file"
+                        or os.path.getsize(path) >= 128 * 1024 * 1024
+                    )
+                    for path, file_format in resolved_pairs
+                )
+            )
+            if should_index_large:
+                added = self.set_lazy_file_index(
+                    resolved_pairs,
+                    append=False,
+                )
+                bladed_indices = [
+                    index
+                    for index, entry in enumerate(self.lazy_entries)
+                    if self.is_bladed_entry(entry)
+                ]
+                if bladed_indices:
+                    self.lazy_selected_batch = set(bladed_indices)
+                    self.begin_lazy_load_batch(len(bladed_indices))
+                    for lazy_index in bladed_indices:
+                        self.ensure_lazy_loaded(
+                            lazy_index,
+                            show_warning=False,
+                            channel_indices=None,
+                        )
+                self.statusBar().showMessage(
+                    "Indexed {:,} large FAST/Bladed file(s); variables load on demand".format(
+                        added
+                    ),
+                    12000,
+                )
+                return time.perf_counter() - t0
             if add and self.lazy_entries:
+                pairs = resolved_pairs
                 added = self.set_lazy_file_index(pairs, append=True)
                 index_by_path = {
                     self.normalized_file_path(entry.path): index
@@ -476,37 +530,59 @@ class QtLoadingMixin:
         except Exception:
             return None
 
-    def estimate_lazy_load_bytes(self, entry):
-        if entry.estimated_load_bytes > 0:
-            return entry.estimated_load_bytes
-        source_bytes = max(0, int(entry.size))
-        if self.is_bladed_entry(entry) and self.is_bladed_project_path(entry.path):
-            directory = os.path.dirname(os.path.abspath(entry.path))
-            directory_key = os.path.normcase(directory)
-            if directory_key not in self._directory_file_sizes:
-                files = []
-                try:
-                    with os.scandir(directory) as entries:
-                        for candidate in entries:
-                            try:
-                                if candidate.is_file(follow_symlinks=False):
-                                    files.append((candidate.name.lower(), candidate.stat().st_size))
-                            except OSError:
-                                continue
-                except OSError:
-                    pass
-                self._directory_file_sizes[directory_key] = files
-            project_root = os.path.splitext(os.path.basename(entry.path))[0].lower()
-            binary_prefix = project_root + ".$"
-            source_bytes = sum(
-                size for name, size in self._directory_file_sizes[directory_key]
-                if name.startswith(binary_prefix)
-            ) or source_bytes
-        # Dataframes, index columns, and decoder scratch space add overhead.
-        entry.estimated_load_bytes = max(
-            64 * 1024 * 1024,
-            int(source_bytes * 2.0),
-        )
+    def estimate_lazy_load_bytes(self, entry, channel_indices=None):
+        if entry.estimated_load_bytes <= 0:
+            decoded_bytes = estimate_decoded_load_bytes(
+                entry.path,
+                entry.file_format,
+            )
+            if decoded_bytes is not None:
+                entry.estimated_load_bytes = max(
+                    64 * 1024 * 1024,
+                    int(decoded_bytes),
+                )
+            else:
+                source_bytes = max(0, int(entry.size))
+                if self.is_bladed_entry(entry) and self.is_bladed_project_path(entry.path):
+                    directory = os.path.dirname(os.path.abspath(entry.path))
+                    directory_key = os.path.normcase(directory)
+                    if directory_key not in self._directory_file_sizes:
+                        files = []
+                        try:
+                            with os.scandir(directory) as entries:
+                                for candidate in entries:
+                                    try:
+                                        if candidate.is_file(follow_symlinks=False):
+                                            files.append((candidate.name.lower(), candidate.stat().st_size))
+                                    except OSError:
+                                        continue
+                        except OSError:
+                            pass
+                        self._directory_file_sizes[directory_key] = files
+                    project_root = os.path.splitext(os.path.basename(entry.path))[0].lower()
+                    binary_prefix = project_root + ".$"
+                    source_bytes = sum(
+                        size for name, size in self._directory_file_sizes[directory_key]
+                        if name.startswith(binary_prefix)
+                    ) or source_bytes
+                # Dataframes, index columns, and decoder scratch space add overhead.
+                entry.estimated_load_bytes = max(
+                    64 * 1024 * 1024,
+                    int(source_bytes * 2.0),
+                )
+        if (
+            channel_indices is not None
+            and getattr(entry.file_format, "name", "") == "FAST output file"
+            and entry.columns
+        ):
+            selected_fraction = min(
+                1.0,
+                len(set(channel_indices)) / len(entry.columns),
+            )
+            return max(
+                64 * 1024 * 1024,
+                int(entry.estimated_load_bytes * selected_fraction),
+            )
         return entry.estimated_load_bytes
 
     def effective_lazy_worker_limit(self):
@@ -522,13 +598,16 @@ class QtLoadingMixin:
             return min(self.lazy_max_workers, self.bladed_worker_cap)
         return self.lazy_max_workers
 
-    def lazy_memory_allows_start(self, entry):
+    def lazy_memory_allows_start(self, entry, channel_indices=None):
         available = self.available_memory_bytes()
         if available is None:
             return True, ""
-        required = self.estimate_lazy_load_bytes(entry)
+        required = self.estimate_lazy_load_bytes(
+            entry,
+            channel_indices=channel_indices,
+        )
         reserved = sum(self.lazy_memory_reservations.values())
-        reserve_floor = max(1024 ** 3, int(available * 0.10))
+        reserve_floor = max(2 * 1024 ** 3, int(available * 0.15))
         if available - reserved - required >= reserve_floor:
             return True, ""
         return False, (
@@ -614,12 +693,13 @@ class QtLoadingMixin:
         while self.lazy_load_queue:
             if len(self.lazy_loader_threads) >= self.effective_lazy_worker_limit():
                 break
-            lazy_index, _channel_indices = self.lazy_load_queue[0]
+            lazy_index, channel_indices = self.lazy_load_queue[0]
             if lazy_index >= len(self.lazy_entries):
                 self.lazy_load_queue.popleft()
                 continue
             allowed, warning = self.lazy_memory_allows_start(
-                self.lazy_entries[lazy_index]
+                self.lazy_entries[lazy_index],
+                channel_indices=channel_indices,
             )
             if not allowed:
                 if self.lazy_loader_threads:
@@ -642,7 +722,12 @@ class QtLoadingMixin:
             self.start_next_lazy_load()
             return
         entry = self.lazy_entries[lazy_index]
-        self.lazy_memory_reservations[lazy_index] = self.estimate_lazy_load_bytes(entry)
+        self.lazy_memory_reservations[lazy_index] = (
+            self.estimate_lazy_load_bytes(
+                entry,
+                channel_indices=channel_indices,
+            )
+        )
         if self.lazy_batch_total <= 1:
             self.status_label.setText("Loading {}".format(entry.basename))
             self.statusBar().showMessage("Loading {}".format(entry.path))
@@ -794,19 +879,73 @@ class QtLoadingMixin:
         self.active_selector_pane = pane
 
         menu = QtWidgets.QMenu(pane.table_list_widget)
+        unload_action = menu.addAction("Unload data (keep indexed)")
         remove_action = menu.addAction("Remove from pyDatView")
         reload_action = menu.addAction("Reload")
         location_action = menu.addAction("Open file location")
         paths = self.selected_source_paths(pane)
+        unload_action.setEnabled(
+            bool(self.lazy_entries)
+            and any(
+                self.lazy_entries[index].loaded
+                for index in self.selected_lazy_indices(pane)
+            )
+        )
         reload_action.setEnabled(bool(paths))
         location_action.setEnabled(any(os.path.exists(path) for path in paths))
         chosen = menu.exec(pane.table_list_widget.mapToGlobal(position))
-        if chosen is remove_action:
+        if chosen is unload_action:
+            self.unload_selected_sources(pane)
+        elif chosen is remove_action:
             self.remove_selected_sources(pane)
         elif chosen is reload_action:
             self.reload_selected_sources(pane)
         elif chosen is location_action:
             self.open_selected_file_locations(pane)
+
+    def unload_selected_sources(self, pane=None):
+        pane = pane or self.active_selector_pane or self.selector_panes[0]
+        lazy_indices = self.selected_lazy_indices(pane)
+        if not lazy_indices:
+            return
+        selected_paths = self.selected_lazy_paths_by_pane()
+        table_indices = {
+            table_index
+            for lazy_index in lazy_indices
+            for table_index in self.lazy_entries[lazy_index].table_indices
+        }
+        if not table_indices:
+            return
+        self.clear()
+        self._delete_table_indices(table_indices)
+        for lazy_index in lazy_indices:
+            entry = self.lazy_entries[lazy_index]
+            entry.table_indices = []
+            entry.warning = ""
+            entry.attempted = False
+            entry.loading = False
+            entry.loaded_column_indices = set()
+            entry.full_loaded = False
+        self.lazy_loaded_total = sum(
+            entry.loaded for entry in self.lazy_entries
+        )
+        self.populate_tables(selected_lazy_paths=selected_paths)
+        for selector in self.visible_selector_panes():
+            selector.y_list_widget.clearSelection()
+        self.redraw_timer.stop()
+        gc.collect()
+        self.status_label.setText(
+            "{:,} files indexed, {:,} loaded".format(
+                len(self.lazy_entries),
+                self.lazy_loaded_count(),
+            )
+        )
+        self.statusBar().showMessage(
+            "Unloaded {:,} simulation(s); scan entries retained".format(
+                len(lazy_indices)
+            ),
+            10000,
+        )
 
     def selected_source_paths(self, pane=None):
         pane = pane or self.active_selector_pane or self.selector_panes[0]

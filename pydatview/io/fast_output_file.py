@@ -579,17 +579,21 @@ def _load_binary_output_selected(filename, channel_indices):
             shape=(nt, num_out_chans),
             order='C',
         )
-        packed_selected = np.asarray(
-            packed[:, packed_columns],
-            dtype=np.float64,
-        )
-        scales = col_scl[packed_columns]
-        offsets = col_off[packed_columns]
-        scaled = (packed_selected - offsets) / scales
-        invalid = np.isnan(scales) & np.isnan(offsets)
-        if np.any(invalid):
-            scaled[:, invalid] = 0.0
-        data[:, output_positions] = scaled
+        for output_position, packed_column in zip(
+                output_positions,
+                packed_columns):
+            scale = col_scl[packed_column]
+            offset = col_off[packed_column]
+            if np.isnan(scale) and np.isnan(offset):
+                data[:, output_position] = 0.0
+                continue
+            np.subtract(
+                packed[:, packed_column],
+                offset,
+                out=data[:, output_position],
+                casting='unsafe',
+            )
+            data[:, output_position] /= scale
         del packed
 
     info = {
@@ -633,6 +637,12 @@ def load_binary_output(
             return data, info
         except Exception as e:
             print('[pyDatView] OpenFAST binary Rust load failed, falling back to Python/NumPy ({}): {}'.format(filename, e))
+    if not use_buffer and os.path.getsize(filename) >= 128 * 1024 * 1024:
+        use_buffer = True
+        print(
+            '[pyDatView] OpenFAST binary load: using buffered low-memory mode '
+            'for {:.1f} MB file'.format(os.path.getsize(filename) / 1024 ** 2)
+        )
     print('[pyDatView] OpenFAST binary load: Python/NumPy ({})'.format(filename))
 
     StructDict = {

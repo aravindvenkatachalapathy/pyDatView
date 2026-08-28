@@ -1,10 +1,12 @@
 import os
 import tempfile
 import unittest
+from types import SimpleNamespace
 
 import numpy as np
 
 from pydatview.io.fast_output_file import FASTOutputFile, writeBinary
+from pydatview.io.load_estimates import estimate_decoded_load_bytes
 
 
 class TestFastSelectiveLoading(unittest.TestCase):
@@ -74,6 +76,23 @@ class TestFastSelectiveLoading(unittest.TestCase):
             selected.data.values,
             full.data.iloc[:, [0, 3]].values,
         )
+
+    def test_binary_memory_estimate_uses_decoded_matrix_shape(self):
+        path = os.path.join(self.temp_dir.name, "estimate.outb")
+        writeBinary(
+            path,
+            self.data,
+            self.names,
+            self.units,
+            fileID=4,
+        )
+
+        estimated = estimate_decoded_load_bytes(
+            path,
+            SimpleNamespace(name='FAST output file'),
+        )
+
+        self.assertEqual(estimated, self.data.size * 8)
 
 
 if __name__ == "__main__":
