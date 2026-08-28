@@ -163,7 +163,14 @@ class MainWindow(
         top.setVerticalSpacing(7)
         root.addWidget(controls_panel)
         self.plot_type_combo = QtWidgets.QComboBox()
-        self.plot_type_combo.addItems(["Regular", "FFT", "PDF", "MinMax", "Compare"])
+        self.plot_type_combo.addItems([
+            "Regular",
+            "FFT",
+            "Cumulative PSD",
+            "PDF",
+            "MinMax",
+            "Compare",
+        ])
         self.mode_combo = QtWidgets.QComboBox()
         self.mode_combo.addItems(["Overlay", "Subplots"])
         self.compare_combo = QtWidgets.QComboBox()
@@ -983,6 +990,7 @@ class MainWindow(
     def on_plot_type_changed(self):
         plot_type = self.plot_type_combo.currentText()
         is_fft = plot_type == "FFT"
+        is_spectral = plot_type in ("FFT", "Cumulative PSD")
         if is_fft and self._previous_plot_type != "FFT":
             self._regular_logy = self.logy_check.isChecked()
             self.logy_check.blockSignals(True)
@@ -993,7 +1001,7 @@ class MainWindow(
             self.logy_check.setChecked(self._regular_logy)
             self.logy_check.blockSignals(False)
         self._previous_plot_type = plot_type
-        self.fft_options_panel.setVisible(is_fft)
+        self.fft_options_panel.setVisible(is_spectral)
         self.comparison_options_panel.setVisible(plot_type == "Compare")
         self.update_fft_control_states()
         self.on_selection_changed()
@@ -1009,6 +1017,17 @@ class MainWindow(
 
     def update_fft_control_states(self):
         averaging = self.fft_averaging_combo.currentText()
+        cumulative = self.plot_type_combo.currentText() == "Cumulative PSD"
+        self.fft_output_combo.setEnabled(not cumulative)
+        self.fft_output_combo.setToolTip(
+            "Cumulative PSD always integrates the power spectral density"
+            if cumulative else "Select the FFT spectrum output"
+        )
+        self.fft_x_combo.setEnabled(not cumulative)
+        self.fft_x_combo.setToolTip(
+            "Cumulative PSD is plotted against frequency"
+            if cumulative else "Select the spectral x-axis"
+        )
         self.fft_window_combo.setEnabled(averaging == "Welch")
         self.fft_nexp_spin.setEnabled(averaging == "Welch")
         self.fft_bins_spin.setEnabled(averaging == "Binning")

@@ -224,6 +224,49 @@ class QtLoadingMixin:
             fileformats = [ff for _, ff in pairs]
             if not filenames:
                 return None
+            if add and self.lazy_entries:
+                added = self.set_lazy_file_index(pairs, append=True)
+                index_by_path = {
+                    self.normalized_file_path(entry.path): index
+                    for index, entry in enumerate(self.lazy_entries)
+                }
+                requested_indices = sorted({
+                    index_by_path[self.normalized_file_path(path)]
+                    for path, _fmt in pairs
+                    if self.normalized_file_path(path) in index_by_path
+                })
+                pending = self.pending_lazy_indices(requested_indices)
+                if pending:
+                    self.lazy_selected_batch = set(requested_indices)
+                    self.begin_lazy_load_batch(len(pending))
+                    for lazy_index in requested_indices:
+                        self.ensure_lazy_loaded(
+                            lazy_index,
+                            show_warning=False,
+                            channel_indices=None,
+                        )
+                    self.finish_lazy_load_batch_if_done()
+                if added:
+                    self.statusBar().showMessage(
+                        "Added {:,} file(s) to the current scan index; {:,} queued for loading".format(
+                            added,
+                            len(pending),
+                        ),
+                        10000,
+                    )
+                elif pending:
+                    self.statusBar().showMessage(
+                        "Queued {:,} indexed file(s) for loading".format(
+                            len(pending)
+                        ),
+                        10000,
+                    )
+                else:
+                    self.statusBar().showMessage(
+                        "The selected files are already loaded in the scan index",
+                        10000,
+                    )
+                return time.perf_counter() - t0
             if self.lazy_entries:
                 self.lazy_generation += 1
                 self.lazy_load_queue = deque()
@@ -398,6 +441,12 @@ class QtLoadingMixin:
         entry.header_attempted = True
         try:
             entry.columns = read_lazy_columns(entry.path, entry.file_format)
+            if entry.unit_flavor:
+                from pydatview.tools.pandalib import unitConversionPlan
+                entry.columns = unitConversionPlan(
+                    entry.columns,
+                    entry.unit_flavor,
+                )[0]
         except Exception as exc:
             entry.warning = "Header read failed: {}: {}".format(type(exc).__name__, exc)
 
@@ -635,6 +684,19 @@ class QtLoadingMixin:
         entry = self.lazy_entries[lazy_index]
         was_loaded = entry.loaded
         if tabs:
+            if entry.unit_flavor:
+                plans = {}
+                from pydatview.tools.pandalib import unitConversionPlan
+                for tab in tabs:
+                    key = tuple(tab.data.columns)
+                    plan = plans.get(key)
+                    if plan is None:
+                        plan = unitConversionPlan(key, entry.unit_flavor)
+                        plans[key] = plan
+                    tab.changeUnits(data={
+                        "flavor": entry.unit_flavor,
+                        "plan": plan,
+                    })
             if was_loaded and len(entry.table_indices) == len(tabs):
                 for table_index, tab in zip(entry.table_indices, tabs):
                     self.tab_list._tabs[table_index] = tab

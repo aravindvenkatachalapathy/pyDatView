@@ -136,6 +136,16 @@ class TestGUI(unittest.TestCase):
             name="openfast",
             filename="openfast.out",
         ))
+        window.tab_list.append(Table(
+            data=pd.DataFrame({
+                "Time [s]": [0.0, 1.0],
+                "Force [N]": [1000.0, 2000.0],
+                "Moment [N-m]": [3000.0, 6000.0],
+                "Angle [rad]": [np.pi / 4.0, np.pi],
+            }),
+            name="second",
+            filename="second.out",
+        ))
         window.populate_tables()
 
         unit_dialog = StandardizeUnitsDialog(initial_flavor="SI", parent=window)
@@ -165,6 +175,13 @@ class TestGUI(unittest.TestCase):
         np.testing.assert_allclose(converted["Pitch [deg]"], [0.0, 90.0])
         np.testing.assert_allclose(converted["Power [kW]"], [1000.0, 2000.0])
         np.testing.assert_allclose(converted["Speed [rpm]"], [0.0, 1.0])
+        converted_second = window.tab_list[1].data
+        self.assertIn("Force [kN]", converted_second.columns)
+        self.assertIn("Moment [kNm]", converted_second.columns)
+        self.assertIn("Angle [deg]", converted_second.columns)
+        np.testing.assert_allclose(converted_second["Force [kN]"], [1.0, 2.0])
+        np.testing.assert_allclose(converted_second["Moment [kNm]"], [3.0, 6.0])
+        np.testing.assert_allclose(converted_second["Angle [deg]"], [45.0, 180.0])
 
         window.close()
         self.app.processEvents()
@@ -360,6 +377,7 @@ class TestGUI(unittest.TestCase):
             for index in range(window.plot_type_combo.count())
         ]
         self.assertIn("Compare", plot_modes)
+        self.assertIn("Cumulative PSD", plot_modes)
         methods = [
             window.comparison_method_combo.itemText(index)
             for index in range(window.comparison_method_combo.count())
@@ -789,6 +807,55 @@ class TestGUI(unittest.TestCase):
             window.close()
             self.app.processEvents()
 
+    def test_add_after_scan_appends_and_queues_without_resetting_index(self):
+        from unittest.mock import patch
+
+        from pydatview.Tables import Table
+        from pydatview.qt_main import MainWindow
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            first_path = os.path.join(temp_dir, "first.out")
+            second_path = os.path.join(temp_dir, "second.out")
+            for path in (first_path, second_path):
+                with open(path, "w", encoding="ascii"):
+                    pass
+            file_format = SimpleNamespace(name="FAST output file")
+            window = MainWindow()
+            window.set_lazy_file_index([(first_path, file_format)])
+            old_entry = window.lazy_entries[0]
+            old_table = Table(
+                data=pd.DataFrame({
+                    "Time [s]": [0.0, 1.0],
+                    "Load [N]": [1.0, 2.0],
+                }),
+                name="first",
+                filename=first_path,
+            )
+            window.tab_list.append(old_table)
+            old_entry.table_indices = [0]
+            old_entry.full_loaded = True
+            window.lazy_loaded_total = 1
+            window.populate_tables()
+
+            with patch.object(window, "ensure_lazy_loaded") as ensure_loaded:
+                window.load_files(
+                    [second_path],
+                    add=True,
+                    fileformats=[file_format],
+                )
+
+            self.assertEqual(len(window.lazy_entries), 2)
+            self.assertIs(window.lazy_entries[0], old_entry)
+            self.assertIs(window.tab_list[0], old_table)
+            self.assertEqual(window.lazy_entries[1].path, second_path)
+            ensure_loaded.assert_called_once_with(
+                1,
+                show_warning=False,
+                channel_indices=None,
+            )
+            window.close()
+            self.app.processEvents()
+
     def test_bladed_batches_use_format_specific_worker_cap(self):
         from pydatview.qt_main import LazyFileEntry, MainWindow
 
@@ -1031,6 +1098,51 @@ class TestGUI(unittest.TestCase):
         self.assertAlmostEqual(plot_data[0].y[peak], 5.0, places=6)
         window.plot_type_combo.setCurrentText("Regular")
         self.assertFalse(window.logy_check.isChecked())
+        window.close()
+        self.app.processEvents()
+
+    def test_cumulative_psd_plot_uses_spectral_controls(self):
+        from pydatview.Tables import Table
+        from pydatview.qt_main import MainWindow
+
+        window = MainWindow()
+        time = np.arange(0.0, 20.0, 0.05)
+        load = (
+            4.0 * np.sin(2.0 * np.pi * time)
+            + 2.0 * np.sin(6.0 * np.pi * time)
+        )
+        window.tab_list.append(Table(
+            data=pd.DataFrame({"Time [s]": time, "Load [N]": load}),
+            name="cumulative_psd",
+            filename="cumulative_psd.out",
+        ))
+        window.populate_tables()
+        pane = window.selector_panes[0]
+        pane.y_list_widget.clearSelection()
+        for row in range(pane.y_list_widget.count()):
+            item = pane.y_list_widget.item(row)
+            if item.text() == "Load [N]":
+                item.setSelected(True)
+        window.fft_averaging_combo.setCurrentText("None")
+        window.fft_detrend_check.setChecked(False)
+        window.plot_type_combo.setCurrentText("Cumulative PSD")
+        window.redraw_timer.stop()
+
+        plot_data = window.build_plot_data()
+
+        self.assertFalse(window.fft_options_panel.isHidden())
+        self.assertFalse(window.fft_output_combo.isEnabled())
+        self.assertFalse(window.fft_x_combo.isEnabled())
+        self.assertEqual(len(plot_data), 1)
+        self.assertTrue(np.all(np.diff(plot_data[0].y) >= -1e-12))
+        self.assertGreater(plot_data[0].y[-1], 0.0)
+        self.assertEqual(plot_data[0].sx, "Frequency [Hz]")
+        self.assertEqual(
+            plot_data[0].sy,
+            "Cumulative PSD(Load) [(N)^2]",
+        )
+        window.plot_type_combo.setCurrentText("Regular")
+        self.assertTrue(window.fft_options_panel.isHidden())
         window.close()
         self.app.processEvents()
 

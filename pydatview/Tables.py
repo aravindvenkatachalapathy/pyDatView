@@ -872,9 +872,17 @@ class Table(object):
         """ Change units of the table """
         if data is None:
             data={'flavor':'WE'}
-        from pydatview.tools.pandalib import changeUnits
-        changeUnits(self.data, flavor=data['flavor'])
-        self._invalidateNativePlotData()
+        from pydatview.tools.pandalib import changeUnits, unitConversionPlan
+        plan = data.get('plan')
+        if plan is None:
+            plan = unitConversionPlan(self.data.columns, data['flavor'])
+        changeUnits(
+            self.data,
+            flavor=data['flavor'],
+            plan=plan,
+        )
+        if plan[1]:
+            self._invalidateNativePlotData()
 
     def convertTimeColumns(self, dayfirst=False):
 

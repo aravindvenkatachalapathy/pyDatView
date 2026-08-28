@@ -129,110 +129,93 @@ def remap_df(df, ColMap, bColKeepNewOnly=False, inPlace=False, dataDict=None, ve
         df=df[ColKeepSafe]
     return df
 
-def changeUnits(df, flavor='SI', inPlace=True):
-    """ Change units of a dataframe
+_UNIT_SCALINGS = {
+    'WE': {
+        'rad/s': (30 / np.pi, 'rpm'),
+        'rad': (180 / np.pi, 'deg'),
+        'n': (1e-3, 'kN'),
+        'mn': (1e3, 'kN'),
+        'nm': (1e-3, 'kNm'),
+        'n-m': (1e-3, 'kNm'),
+        'n*m': (1e-3, 'kNm'),
+        'mnm': (1e3, 'kNm'),
+        'mn-m': (1e3, 'kNm'),
+        'mn*m': (1e3, 'kNm'),
+        'w': (1e-3, 'kW'),
+        'mw': (1e3, 'kW'),
+    },
+    'SI': {
+        'rpm': (np.pi / 30, 'rad/s'),
+        'deg': (np.pi / 180, 'rad'),
+        'deg/s': (np.pi / 180, 'rad/s'),
+        'mn': (1e6, 'N'),
+        'kn': (1e3, 'N'),
+        'mnm': (1e6, 'Nm'),
+        'mn-m': (1e6, 'Nm'),
+        'mn*m': (1e6, 'Nm'),
+        'knm': (1e3, 'Nm'),
+        'kn-m': (1e3, 'Nm'),
+        'kn*m': (1e3, 'Nm'),
+        'kw': (1e3, 'W'),
+        'mw': (1e6, 'W'),
+    },
+}
 
-    # TODO harmonize with dfToSIunits in welib.fast.tools.lin.py !
-    """
-    def splitunit(s0):
-        """ 
-        return (variable, unit, previous character, brackets)
-        e.g.   ( 'Time' ,  's',   '_'             , '[]')
-        """
-        s=s0.replace('(',' [').replace(')',']')
-        iu=s.rfind('[')
-        if iu>1:
-            bracket = s0[iu:iu+1]
-            if bracket=='(':
-                brackets='()'
-            else:
-                brackets='[]'
-            if iu>1:
-                prev_char=s0[(iu-1):iu]
-                if prev_char not in [' ', '_']:
-                    prev_char=''
-                    svar=s[:iu]
-                else:
-                    svar=s[:iu-1]
-            return svar, s[iu+1:].replace(']',''), prev_char, brackets
-        else:
-            return s, '', '', ''
-    def change_units_to_WE(s, c):
-        """ 
-        Change units to wind energy units
-        s: channel name (string) containing units, typically 'speed_[rad/s]'
-        c: channel (array)
-        """
-        svar, u, prev, brackets = splitunit(s)
-        u=u.lower()
-        scalings = {}
-        #        OLD      =     NEW
-        scalings['rad/s'] =  (30/np.pi,'rpm') # TODO decide
-        scalings['rad' ]  =   (180/np.pi,'deg')
-        scalings['n']     =   (1e-3, 'kN')
-        scalings['mn']    =   (1e+3, 'kN')
-        scalings['nm']    =   (1e-3, 'kNm')
-        scalings['n-m']   =   (1e-3, 'kNm')
-        scalings['n*m']   =   (1e-3, 'kNm')
-        scalings['mnm']   =   (1e+3, 'kNm')
-        scalings['mn-m']  =   (1e+3, 'kNm')
-        scalings['mn*m']  =   (1e+3, 'kNm')
-        scalings['w']     =   (1e-3, 'kW')
-        scalings['mw']    =   (1e+3, 'kW')
-        if u in scalings.keys():
-            scale, new_unit = scalings[u]
-            s = svar+prev+brackets[0]+new_unit+brackets[1]
-            c *= scale
-        return s, c
 
-    def change_units_to_SI(s, c):
-        """ 
-        Change units to SI units
-        TODO, a lot more units conversion needed...will add them as we go
-        s: channel name (string) containing units, typically 'speed_[rad/s]'
-        c: channel (array)
-        """
-        svar, u, prev, brackets = splitunit(s)
-        u=u.lower()
-        scalings = {}
-        #        OLD      =     NEW
-        scalings['rpm']    =  (np.pi/30,'rad/s')
-        scalings['deg']    =  (np.pi/180,'rad')
-        scalings['deg/s' ] =  (np.pi/180,'rad/s')
-        scalings['mn']     =   (1e6, 'N')
-        scalings['kn']     =   (1e3, 'N')
-        scalings['mnm']    =   (1e6, 'Nm')
-        scalings['mnm']    =   (1e6, 'Nm')
-        scalings['mn-m']   =   (1e6, 'Nm')
-        scalings['mn*m']   =   (1e6, 'Nm')
-        scalings['knm']    =   (1e3, 'Nm')
-        scalings['kn-m']   =   (1e3, 'Nm')
-        scalings['kn*m']   =   (1e3, 'Nm')
-        scalings['kw']     =   (1e3, 'W')
-        scalings['mw']     =   (1e6 ,'W')
-        if u in scalings.keys():
-            scale, new_unit = scalings[u]
-            s = svar+prev+brackets[0]+new_unit+brackets[1]
-            c *= scale
-        return s, c
+def _split_unit(column_name):
+    """Return the variable, unit, separator, and bracket style."""
+    column_name = str(column_name)
+    square = column_name.rfind('[')
+    round_ = column_name.rfind('(')
+    start = max(square, round_)
+    if start <= 1:
+        return column_name, '', '', ''
+    closing = ']' if start == square else ')'
+    end = column_name.find(closing, start + 1)
+    if end < 0:
+        return column_name, '', '', ''
+    separator = column_name[start - 1:start]
+    if separator in (' ', '_'):
+        variable = column_name[:start - 1]
+    else:
+        separator = ''
+        variable = column_name[:start]
+    brackets = '[]' if start == square else '()'
+    return variable, column_name[start + 1:end], separator, brackets
 
+
+def unitConversionPlan(columns, flavor='SI'):
+    """Return renamed columns and only the numeric scalings that are needed."""
+    if flavor not in _UNIT_SCALINGS:
+        raise NotImplementedError(flavor)
+    scalings = _UNIT_SCALINGS[flavor]
+    renamed = []
+    conversions = []
+    for index, column_name in enumerate(columns):
+        variable, unit, separator, brackets = _split_unit(column_name)
+        conversion = scalings.get(unit.lower())
+        if conversion is None:
+            renamed.append(str(column_name))
+            continue
+        scale, new_unit = conversion
+        renamed.append(
+            variable + separator + brackets[0] + new_unit + brackets[1]
+        )
+        conversions.append((index, scale))
+    return renamed, conversions
+
+
+def changeUnits(df, flavor='SI', inPlace=True, plan=None):
+    """Change dataframe units in place, skipping columns that need no scaling."""
     if not inPlace:
         raise NotImplementedError()
-
-    if flavor == 'WE':
-        cols = []
-        for i, colname in enumerate(df.columns):
-            colname_new, df.iloc[:,i] = change_units_to_WE(colname, df.iloc[:,i])
-            cols.append(colname_new)
-        df.columns = cols
-    elif flavor == 'SI':
-        cols = []
-        for i, colname in enumerate(df.columns):
-            colname_new, col_new = change_units_to_SI(colname, df.iloc[:,i])
-            df[colname] = df[colname].astype(col_new.dtype) # Need to cast to new type if type changed..
-            df.iloc[:,i] = col_new
-            cols.append(colname_new)
-        df.columns = cols
-    else:
-        raise NotImplementedError(flavor)
+    renamed, conversions = plan or unitConversionPlan(df.columns, flavor)
+    for index, scale in conversions:
+        scaled = df.iloc[:, index] * scale
+        if hasattr(df, 'isetitem'):
+            df.isetitem(index, scaled)
+        else:
+            df.iloc[:, index] = scaled
+    if list(df.columns) != renamed:
+        df.columns = renamed
     return df

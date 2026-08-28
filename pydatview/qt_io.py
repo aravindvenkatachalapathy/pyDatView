@@ -26,6 +26,7 @@ class LazyFileEntry:
     loaded_column_indices: set = field(default_factory=set)
     full_loaded: bool = False
     estimated_load_bytes: int = 0
+    unit_flavor: str = ""
 
     @property
     def loaded(self):

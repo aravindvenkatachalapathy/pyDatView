@@ -182,36 +182,38 @@ class QtToolsStatsMixin:
         self.statusBar().showMessage(message, 12000)
 
     def standardize_units(self, flavor, label):
-        partial = [
-            lazy_index for lazy_index in self.selected_lazy_indices()
-            if not self.lazy_entries[lazy_index].full_loaded
-        ]
-        if partial:
-            self.statusBar().showMessage(
-                "Use Load full selected before standardizing table units",
-                10000,
-            )
-            return
-        indices = self.selected_table_indices(load=False)
-        if not indices:
-            indices = list(range(len(self.tab_list)))
+        started = time.perf_counter()
+        indices = list(range(len(self.tab_list)))
         if not indices:
             self.statusBar().showMessage("No loaded tables to standardize", 8000)
             return
 
+        from pydatview.tools.pandalib import unitConversionPlan
+
         changed = 0
+        plans = {}
         for it in indices:
             tab = self.tab_list[it]
             before = list(tab.data.columns)
-            tab.changeUnits(data={"flavor": flavor})
+            key = tuple(before)
+            plan = plans.get(key)
+            if plan is None:
+                plan = unitConversionPlan(key, flavor)
+                plans[key] = plan
+            tab.changeUnits(data={"flavor": flavor, "plan": plan})
             after = list(tab.data.columns)
             if before != after:
                 changed += 1
-                print(
-                    "[pyDatView] Standardized units to {}: {}".format(
-                        label, tab.active_name
-                    )
-                )
+
+        for entry in self.lazy_entries:
+            if not entry.loaded:
+                continue
+            entry.unit_flavor = flavor
+            if entry.columns:
+                entry.columns = unitConversionPlan(
+                    entry.columns,
+                    flavor,
+                )[0]
 
         for pane in self.visible_selector_panes():
             self.populate_columns(pane)
@@ -220,8 +222,11 @@ class QtToolsStatsMixin:
         if self.live_plot.isChecked() and not self.has_unloaded_lazy_selection():
             self.redraw()
         self.statusBar().showMessage(
-            "Standardized units to {} for {:,} loaded table(s), {:,} changed".format(
-                label, len(indices), changed
+            "Standardized units to {} for {:,} loaded table(s), {:,} changed in {:.3f}s".format(
+                label,
+                len(indices),
+                changed,
+                time.perf_counter() - started,
             ),
             12000,
         )

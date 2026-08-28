@@ -328,6 +328,50 @@ class PlotData():
         PD.computeRange()
         return Info
 
+    def toCumulativePSD(
+            PD,
+            avgMethod='Welch',
+            avgWindow='Hamming',
+            bDetrend=True,
+            nExp=8,
+            nPerDecade=10):
+        """Convert plot data to cumulative integrated PSD versus frequency."""
+        signal_name = no_unit(PD.sy)
+        signal_unit = unit(PD.sy)
+        info = PD.toFFT(
+            yType='PSD',
+            xType='1/x',
+            avgMethod=avgMethod,
+            avgWindow=avgWindow,
+            bDetrend=bDetrend,
+            nExp=nExp,
+            nPerDecade=nPerDecade,
+        )
+        frequency = np.asarray(PD.x, dtype=float)
+        density = np.asarray(PD.y, dtype=float)
+        valid = np.isfinite(frequency) & np.isfinite(density)
+        frequency = frequency[valid]
+        density = density[valid]
+        order = np.argsort(frequency)
+        frequency = frequency[order]
+        density = density[order]
+        cumulative = np.zeros(len(frequency), dtype=float)
+        if len(frequency) > 1:
+            increments = (
+                0.5
+                * (density[1:] + density[:-1])
+                * np.diff(frequency)
+            )
+            cumulative[1:] = np.cumsum(increments)
+        PD.x = frequency
+        PD.y = cumulative
+        PD.sx = 'Frequency [Hz]' if unit(PD.sx) == 'Hz' else PD.sx
+        PD.sy = 'Cumulative PSD({})'.format(signal_name)
+        if signal_unit:
+            PD.sy += ' [({})^2]'.format(signal_unit)
+        PD.computeRange()
+        return info
+
     def toPolar(PD, Deg=True, Bins='None', About='z', rRef=None, **data):
         """ Convert plot data to polar data based on GUI options
         NOTE: inPlace

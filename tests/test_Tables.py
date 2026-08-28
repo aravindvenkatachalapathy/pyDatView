@@ -111,6 +111,23 @@ class TestTable(unittest.TestCase):
         np.testing.assert_almost_equal(tab.data.values[:,3],[10])
         np.testing.assert_equal(tab.columns.tolist(), ['Index','om [rpm]', 'F [kN]', 'angle_[deg]'])
 
+    def test_change_units_skips_already_standardized_columns(self):
+        tab = Table(data=pd.DataFrame({
+            'Time [s]': [0.0, 1.0],
+            'Force [N]': [1.0, 2.0],
+            'Label': ['a', 'b'],
+        }))
+        native = np.arange(8.0).reshape(2, 4)
+        tab._native_plot_matrix = native
+
+        tab.changeUnits(data={'flavor': 'SI'})
+
+        self.assertIs(tab._native_plot_matrix, native)
+        np.testing.assert_equal(
+            tab.columns.tolist(),
+            ['Index', 'Time [s]', 'Force [N]', 'Label'],
+        )
+
     def test_transformed_table_preserves_native_plot_rows(self):
         source = Table(data=pd.DataFrame({
             'Time_[s]': np.arange(5.0),

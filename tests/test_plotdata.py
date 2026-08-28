@@ -46,6 +46,34 @@ class TestPlotData(unittest.TestCase):
         self.assertAlmostEqual(PD.x[peak], 1 / f0)
         self.assertAlmostEqual(PD.y[peak], 3.0)
 
+    def test_cumulative_psd_integrates_psd_over_frequency(self):
+        dt = 0.05
+        t = np.arange(0, 20, dt)
+        y = (
+            3.0 * np.sin(2 * np.pi * 1.0 * t)
+            + 1.5 * np.sin(2 * np.pi * 3.0 * t)
+        )
+        psd = PlotData(t, y, sx='Time [s]', sy='Load [N]')
+        psd.toFFT(
+            yType='PSD',
+            avgMethod='None',
+            bDetrend=False,
+        )
+        cumulative = PlotData(t, y, sx='Time [s]', sy='Load [N]')
+        info = cumulative.toCumulativePSD(
+            avgMethod='None',
+            bDetrend=False,
+        )
+
+        expected = np.sum(
+            0.5 * (psd.y[1:] + psd.y[:-1]) * np.diff(psd.x)
+        )
+        self.assertIsNotNone(info)
+        self.assertTrue(np.all(np.diff(cumulative.y) >= -1e-12))
+        self.assertAlmostEqual(cumulative.y[-1], expected)
+        self.assertEqual(cumulative.sx, 'Frequency [Hz]')
+        self.assertEqual(cumulative.sy, 'Cumulative PSD(Load) [(N)^2]')
+
     def test_MinMax(self):
         # Test Min Max scaling (between 0 and 1)
         x = np.linspace(-2,2,100)

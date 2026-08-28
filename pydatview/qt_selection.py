@@ -397,6 +397,14 @@ class QtSelectionPlotMixin:
                 nExp=self.fft_nexp_spin.value(),
                 nPerDecade=self.fft_bins_spin.value(),
             )
+        elif plot_type == "Cumulative PSD":
+            pd.toCumulativePSD(
+                avgMethod=self.fft_averaging_combo.currentText(),
+                avgWindow=self.fft_window_combo.currentText(),
+                bDetrend=self.fft_detrend_check.isChecked(),
+                nExp=self.fft_nexp_spin.value(),
+                nPerDecade=self.fft_bins_spin.value(),
+            )
         elif plot_type == "MinMax":
             pd.toMinMax(xScale=False, yScale=True, yCenter="None")
 
