@@ -97,6 +97,10 @@ class TableList(object): # todo inherit list
 
     def load_tables_from_files(self, filenames=[], fileformats=None, bAdd=False, bReload=False, statusFunction=None):
         """ load multiple files into table list"""
+        if fileformats is not None and len(fileformats) != len(filenames):
+            raise ValueError(
+                "fileformats must contain one entry per filename"
+            )
         if not bAdd:
             self.clean() # TODO figure it out
         if bReload:
@@ -109,11 +113,15 @@ class TableList(object): # todo inherit list
         # Loop through files, appending tables within files
         warnList=[]
         newTabs=[]
-        opened_filenames=set(self.unique_filenames)
+        normalize = lambda path: os.path.normcase(os.path.realpath(path))
+        opened_filenames = {
+            normalize(path) for path in self.unique_filenames if path
+        }
         for i, (f,ff) in enumerate(zip(filenames, fileformats)):
             if statusFunction is not None:
                 statusFunction(i)
-            if f in opened_filenames:
+            normalized_filename = normalize(f)
+            if normalized_filename in opened_filenames:
                 warnList.append('Warn: Cannot add a file already opened ' + f)
             elif len(f)==0:
                 pass
@@ -125,7 +133,7 @@ class TableList(object): # todo inherit list
                 self.append(tabs)
                 newTabs +=tabs
                 if tabs:
-                    opened_filenames.add(f)
+                    opened_filenames.add(normalized_filename)
         
         return newTabs, warnList
 

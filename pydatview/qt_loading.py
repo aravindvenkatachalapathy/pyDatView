@@ -214,7 +214,12 @@ class QtLoadingMixin:
 
     def load_files(self, filenames, add=False, fileformats=None, status_prefix="Loading files"):
         t0 = time.perf_counter()
+        previous_state = None
         try:
+            if fileformats is not None and len(fileformats) != len(filenames):
+                raise ValueError(
+                    "fileformats must contain one entry per filename"
+                )
             if fileformats is None:
                 pairs = [(f, None) for f in filenames if os.path.isfile(f)]
             else:
@@ -224,6 +229,12 @@ class QtLoadingMixin:
             fileformats = [ff for _, ff in pairs]
             if not filenames:
                 return None
+            if not add:
+                previous_state = (
+                    list(self.tab_list._tabs),
+                    list(self.current_files),
+                    list(self.lazy_entries),
+                )
             if add and self.lazy_entries:
                 added = self.set_lazy_file_index(pairs, append=True)
                 index_by_path = {
@@ -280,6 +291,9 @@ class QtLoadingMixin:
             if not add:
                 self.tab_list.clean()
                 self.current_files = []
+            selected_table_sources = (
+                self.selected_table_sources_by_pane() if add else None
+            )
 
             last_status = {"t": 0.0}
 
@@ -298,6 +312,15 @@ class QtLoadingMixin:
                 bReload=False,
                 statusFunction=status_function,
             )
+            try:
+                self.apply_active_units_to_tabs(new_tabs)
+            except Exception:
+                new_ids = {id(tab) for tab in new_tabs}
+                self.tab_list._tabs = [
+                    tab for tab in self.tab_list if id(tab) not in new_ids
+                ]
+                self.current_files = self.tab_list.filenames
+                raise
             self.current_files = self.tab_list.filenames
             warnings = [warning for warning in warnings if warning]
             if warnings:
@@ -309,7 +332,23 @@ class QtLoadingMixin:
                 self.status_label.setText("No tables loaded")
                 return time.perf_counter() - t0
             selected_table_indices = None
-            if not add:
+            if add and selected_table_sources is not None:
+                visible = self.visible_selector_panes()
+                if visible:
+                    target_pane = (
+                        visible.index(self.active_selector_pane)
+                        if self.active_selector_pane in visible else 0
+                    )
+                    for tab in new_tabs:
+                        if self.is_bladed_project_path(tab.filename):
+                            token = (
+                                "bladed_project",
+                                self.normalized_file_path(tab.filename),
+                            )
+                        else:
+                            token = ("table", id(tab))
+                        selected_table_sources[target_pane].add(token)
+            elif not add:
                 groups = self.tab_list.side_by_side_groups(new_tabs)
                 group = next((items for items in groups if len(items) >= 2), None)
                 if group is not None:
@@ -322,18 +361,34 @@ class QtLoadingMixin:
                         table_indices[id(tab)] for tab in group[:pane_count]
                     ]
             self.populate_tables(
-                selected_table_indices=selected_table_indices
+                selected_table_indices=selected_table_indices,
+                selected_table_sources=selected_table_sources,
             )
             self.status_label.setText("{} tables loaded".format(len(self.tab_list)))
             self.redraw()
             return time.perf_counter() - t0
         except Exception as exc:
+            if not add and previous_state is not None:
+                tabs, current_files, lazy_entries = previous_state
+                self.tab_list._tabs = tabs
+                self.current_files = current_files
+                self.lazy_entries = lazy_entries
+                self.lazy_item_widgets = {}
+                self.populate_tables()
+                self.status_label.setText(
+                    "{:,} files indexed, {:,} loaded".format(
+                        len(self.lazy_entries),
+                        self.lazy_loaded_count(),
+                    ) if self.lazy_entries else "{} tables loaded".format(
+                        len(self.tab_list)
+                    )
+                )
             self.show_exception("Failed to load files", exc)
             return None
 
     @staticmethod
     def normalized_file_path(path):
-        return os.path.normcase(os.path.abspath(path))
+        return os.path.normcase(os.path.realpath(path))
 
     def selected_lazy_paths_by_pane(self):
         selected = []
@@ -346,6 +401,25 @@ class QtLoadingMixin:
                 for data in [item.data(QtCore.Qt.UserRole)]
                 if isinstance(data, tuple) and data[0] == "lazy"
             })
+        return selected
+
+    def selected_table_sources_by_pane(self):
+        """Return stable selection tokens while regular tables are appended."""
+        selected = []
+        for pane in self.visible_selector_panes():
+            tokens = set()
+            for item in pane.table_list_widget.selectedItems():
+                data = item.data(QtCore.Qt.UserRole)
+                if not isinstance(data, tuple):
+                    continue
+                if data[0] == "table" and data[1] < len(self.tab_list):
+                    tokens.add(("table", id(self.tab_list[data[1]])))
+                elif data[0] == "bladed_project":
+                    tokens.add((
+                        "bladed_project",
+                        self.normalized_file_path(data[1]),
+                    ))
+            selected.append(tokens)
         return selected
 
     def set_lazy_file_index(self, matches, append=False):
@@ -373,6 +447,7 @@ class QtLoadingMixin:
                         file_format=fmt,
                         size=size,
                         mtime=mtime,
+                        unit_flavor=self.unit_flavor,
                     )
                 )
                 known_paths.add(normalized)
@@ -396,9 +471,13 @@ class QtLoadingMixin:
         self.lazy_selected_batch = set()
         self.lazy_selection_refresh_pending = False
         self.tab_list.clean()
-        self.current_files = [path for path, _ in matches]
+        self.current_files = []
         self.lazy_entries = []
+        known_paths = set()
         for path, fmt in matches:
+            normalized = self.normalized_file_path(path)
+            if normalized in known_paths:
+                continue
             try:
                 stat = os.stat(path)
                 size = stat.st_size
@@ -406,7 +485,15 @@ class QtLoadingMixin:
             except OSError:
                 size = 0
                 mtime = 0.0
-            self.lazy_entries.append(LazyFileEntry(path=path, file_format=fmt, size=size, mtime=mtime))
+            self.lazy_entries.append(LazyFileEntry(
+                path=path,
+                file_format=fmt,
+                size=size,
+                mtime=mtime,
+                unit_flavor=self.unit_flavor,
+            ))
+            self.current_files.append(path)
+            known_paths.add(normalized)
         self.populate_tables()
         self.clear()
         self.status_label.setText("{:,} files indexed, 0 loaded".format(len(self.lazy_entries)))
@@ -685,32 +772,36 @@ class QtLoadingMixin:
         was_loaded = entry.loaded
         if tabs:
             if entry.unit_flavor:
-                plans = {}
-                from pydatview.tools.pandalib import unitConversionPlan
-                for tab in tabs:
-                    key = tuple(tab.data.columns)
-                    plan = plans.get(key)
-                    if plan is None:
-                        plan = unitConversionPlan(key, entry.unit_flavor)
-                        plans[key] = plan
-                    tab.changeUnits(data={
-                        "flavor": entry.unit_flavor,
-                        "plan": plan,
-                    })
-            if was_loaded and len(entry.table_indices) == len(tabs):
-                for table_index, tab in zip(entry.table_indices, tabs):
-                    self.tab_list._tabs[table_index] = tab
-            else:
-                start = len(self.tab_list)
-                self.tab_list.append(tabs)
-                entry.table_indices = list(range(start, start + len(tabs)))
-                if not was_loaded:
-                    self.lazy_loaded_total += 1
-            if loaded_column_indices is None:
-                entry.full_loaded = True
-                entry.loaded_column_indices = set(range(len(entry.columns)))
-            else:
-                entry.loaded_column_indices = set(loaded_column_indices)
+                try:
+                    self.apply_active_units_to_tabs(tabs)
+                except Exception as exc:
+                    unit_warning = (
+                        "Failed to standardize units to {}: {}: {}".format(
+                            entry.unit_flavor,
+                            type(exc).__name__,
+                            exc,
+                        )
+                    )
+                    warning = (
+                        "{}\n{}".format(warning, unit_warning)
+                        if warning else unit_warning
+                    )
+                    tabs = []
+            if tabs:
+                if was_loaded and len(entry.table_indices) == len(tabs):
+                    for table_index, tab in zip(entry.table_indices, tabs):
+                        self.tab_list._tabs[table_index] = tab
+                else:
+                    start = len(self.tab_list)
+                    self.tab_list.append(tabs)
+                    entry.table_indices = list(range(start, start + len(tabs)))
+                    if not was_loaded:
+                        self.lazy_loaded_total += 1
+                if loaded_column_indices is None:
+                    entry.full_loaded = True
+                    entry.loaded_column_indices = set(range(len(entry.columns)))
+                else:
+                    entry.loaded_column_indices = set(loaded_column_indices)
         entry.warning = warning or ""
         entry.attempted = not tabs and not entry.loaded
         entry.loading = False
@@ -985,6 +1076,14 @@ class QtLoadingMixin:
 
         rebuilt = []
         inserted = set()
+        replacement_tabs = [
+            tab for tabs in replacements.values() for tab in tabs
+        ]
+        try:
+            self.apply_active_units_to_tabs(replacement_tabs)
+        except Exception as exc:
+            self.show_exception("Failed to reload files", exc)
+            return
         for tab in old_tabs:
             key = (
                 self.normalized_file_path(tab.filename) if tab.filename else None
@@ -1037,6 +1136,11 @@ class QtLoadingMixin:
         self.lazy_selected_batch = set()
         self.lazy_selection_refresh_pending = False
         self.tab_list.from_dataframes(dataframes=dataframes, names=names, bAdd=False)
+        try:
+            self.apply_active_units_to_tabs(list(self.tab_list))
+        except Exception:
+            self.tab_list.clean()
+            raise
         self.populate_tables()
         self.status_label.setText("{} tables loaded".format(len(self.tab_list)))
         self.redraw()
@@ -1075,7 +1179,8 @@ class QtLoadingMixin:
     def populate_tables(
             self,
             selected_lazy_paths=None,
-            selected_table_indices=None):
+            selected_table_indices=None,
+            selected_table_sources=None):
         visible = self.visible_selector_panes()
         names = self.tab_list.getDisplayTabNames() if not self.lazy_entries else []
         self.lazy_item_widgets = {}
@@ -1092,13 +1197,13 @@ class QtLoadingMixin:
                 displayed_projects = set()
                 for i, tab in enumerate(self.tab_list):
                     if self.is_bladed_project_path(tab.filename):
-                        project_path = os.path.abspath(tab.filename)
+                        project_path = self.normalized_file_path(tab.filename)
                         if project_path in displayed_projects:
                             continue
                         displayed_projects.add(project_path)
                         group_count = sum(
                             1 for candidate in self.tab_list
-                            if os.path.abspath(candidate.filename) == project_path
+                            if self.normalized_file_path(candidate.filename) == project_path
                         )
                         item = QtWidgets.QListWidgetItem(os.path.basename(tab.filename))
                         item.setToolTip("{} Bladed variable groups".format(group_count))
@@ -1142,6 +1247,26 @@ class QtLoadingMixin:
                         item.setSelected(True)
                         restored_selection = True
                         break
+            elif not self.lazy_entries and selected_table_sources is not None:
+                sources = (
+                    selected_table_sources[pane_index]
+                    if pane_index < len(selected_table_sources)
+                    else set()
+                )
+                for row in range(pane.table_list_widget.count()):
+                    item = pane.table_list_widget.item(row)
+                    data = item.data(QtCore.Qt.UserRole)
+                    token = None
+                    if isinstance(data, tuple) and data[0] == "table":
+                        token = ("table", id(self.tab_list[data[1]]))
+                    elif isinstance(data, tuple) and data[0] == "bladed_project":
+                        token = (
+                            "bladed_project",
+                            self.normalized_file_path(data[1]),
+                        )
+                    if token in sources:
+                        item.setSelected(True)
+                        restored_selection = True
             if pane.table_list_widget.count() > 0 and not restored_selection:
                 default_row = min(pane_index, pane.table_list_widget.count() - 1)
                 pane.table_list_widget.item(default_row).setSelected(True)
@@ -1181,7 +1306,7 @@ class QtLoadingMixin:
                 if self.is_bladed_project_path(tab.filename):
                     path = tab.filename
             if path:
-                normalized = os.path.abspath(path)
+                normalized = self.normalized_file_path(path)
                 if normalized not in seen:
                     paths.append(normalized)
                     seen.add(normalized)
@@ -1199,7 +1324,7 @@ class QtLoadingMixin:
         group = self.selected_bladed_group(pane) if group is None else group
         return [
             i for i, tab in enumerate(self.tab_list)
-            if os.path.abspath(tab.filename) in paths
+            if self.normalized_file_path(tab.filename) in paths
             and (group == "__all__" or tab.nickname == group)
         ]
 
@@ -1221,7 +1346,7 @@ class QtLoadingMixin:
                         seen.add(data[1])
                 elif isinstance(data, tuple) and data[0] == "lazy":
                     entry = self.lazy_entries[data[1]]
-                    if os.path.abspath(entry.path) in project_paths:
+                    if self.normalized_file_path(entry.path) in project_paths:
                         continue
                     if entry.loaded:
                         for table_index in entry.table_indices:

@@ -291,6 +291,82 @@ def compare_plot_data(plot_data, method):
     return compared
 
 
+def box_plot_data(plot_data):
+    """Return one conventional distribution box for each selected file/curve."""
+    from pydatview.plotdata import PlotData
+
+    channel_count = len({
+        (
+            getattr(pd, "pane_index", 0),
+            getattr(pd, "selection_index", getattr(pd, "iy", 0)),
+            getattr(pd, "sy", ""),
+        )
+        for pd in plot_data
+    })
+    source_colors = {}
+    result = []
+    for position, pd in enumerate(plot_data):
+        if pd.yIsString or pd.yIsDate:
+            raise ValueError(
+                "Box plots require a numeric Y variable"
+            )
+        values = np.asarray(pd.y).reshape(-1)
+        if values.dtype.kind not in "biuf":
+            values = _as_float_array(values).reshape(-1)
+        finite = np.isfinite(values)
+        if not finite.all():
+            values = values[finite]
+        if len(values) == 0:
+            continue
+        q1, median, q3 = np.percentile(values, [25.0, 50.0, 75.0])
+        mean = float(np.mean(values))
+        filename = getattr(pd, "filename", "")
+        file_label = os.path.basename(filename) if filename else getattr(pd, "st", "")
+        if not file_label:
+            file_label = getattr(pd, "tabname", "") or "File {}".format(position + 1)
+        tick_label = (
+            "{} | {}".format(file_label, no_unit(pd.sy))
+            if channel_count > 1 else file_label
+        )
+        source = _comparison_source(pd)
+        if source not in source_colors:
+            source_colors[source] = len(source_colors)
+
+        box = PlotData(
+            x=np.asarray([float(position)]),
+            y=np.asarray([mean]),
+            sx="File",
+            sy=pd.sy,
+        )
+        box.syl = tick_label
+        box.st = pd.st
+        box.filename = filename
+        box.tabname = getattr(pd, "tabname", "")
+        box.it = getattr(pd, "it", None)
+        box.pane_index = getattr(pd, "pane_index", 0)
+        box.selection_index = getattr(
+            pd, "selection_index", getattr(pd, "iy", 0)
+        )
+        box.color_index = source_colors[source]
+        box.boxplot_label = tick_label
+        box.boxplot_stats = {
+            "minimum": float(np.min(values)),
+            "q1": float(q1),
+            "median": float(median),
+            "mean": mean,
+            "q3": float(q3),
+            "maximum": float(np.max(values)),
+        }
+        # The Stats tab should continue to describe the source time series.
+        box.x0 = pd.x
+        box.y0 = pd.y
+        result.append(box)
+
+    if not result:
+        raise ValueError("Box plots need at least one finite numeric series")
+    return result
+
+
 def swap_plot_axes(pd):
     pd.x, pd.y = pd.y, pd.x
     pd.sx, pd.sy = pd.sy, pd.sx
@@ -345,4 +421,3 @@ def _plot_ready_xy(x, y, logx=False, logy=False):
     if valid.all():
         return x, y
     return x[valid], y[valid]
-

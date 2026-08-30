@@ -168,7 +168,7 @@ def _split_unit(column_name):
     square = column_name.rfind('[')
     round_ = column_name.rfind('(')
     start = max(square, round_)
-    if start <= 1:
+    if start < 1:
         return column_name, '', '', ''
     closing = ']' if start == square else ')'
     end = column_name.find(closing, start + 1)
@@ -193,7 +193,12 @@ def unitConversionPlan(columns, flavor='SI'):
     conversions = []
     for index, column_name in enumerate(columns):
         variable, unit, separator, brackets = _split_unit(column_name)
-        conversion = scalings.get(unit.lower())
+        # SI prefixes are case-sensitive: mW/mN are milli-units, not MW/MN.
+        conversion = (
+            None
+            if unit in {'mW', 'mN', 'mNm', 'mN-m', 'mN*m'}
+            else scalings.get(unit.lower())
+        )
         if conversion is None:
             renamed.append(str(column_name))
             continue
@@ -202,7 +207,37 @@ def unitConversionPlan(columns, flavor='SI'):
             variable + separator + brackets[0] + new_unit + brackets[1]
         )
         conversions.append((index, scale))
+    source_names_by_target = {}
+    for source, target in zip(map(str, columns), renamed):
+        source_names_by_target.setdefault(target, set()).add(source)
+    duplicates = sorted(
+        target for target, sources in source_names_by_target.items()
+        if len(sources) > 1
+    )
+    if duplicates:
+        raise ValueError(
+            "Unit conversion would create duplicate column name(s): {}".format(
+                ", ".join(duplicates)
+            )
+        )
     return renamed, conversions
+
+
+def validateUnitConversion(df, plan):
+    """Validate a conversion plan without modifying the dataframe."""
+    renamed, conversions = plan
+    if len(renamed) != len(df.columns):
+        raise ValueError("Unit conversion plan does not match the dataframe")
+    for index, _scale in conversions:
+        if index < 0 or index >= len(df.columns):
+            raise IndexError("Unit conversion column index is out of range")
+        series = df.iloc[:, index]
+        if not pd.api.types.is_numeric_dtype(series.dtype):
+            raise TypeError(
+                "Cannot convert nonnumeric column '{}' with dtype {}".format(
+                    df.columns[index], series.dtype
+                )
+            )
 
 
 def changeUnits(df, flavor='SI', inPlace=True, plan=None):
@@ -210,6 +245,7 @@ def changeUnits(df, flavor='SI', inPlace=True, plan=None):
     if not inPlace:
         raise NotImplementedError()
     renamed, conversions = plan or unitConversionPlan(df.columns, flavor)
+    validateUnitConversion(df, (renamed, conversions))
     for index, scale in conversions:
         scaled = df.iloc[:, index] * scale
         if hasattr(df, 'isetitem'):

@@ -483,6 +483,227 @@ class TestGUI(unittest.TestCase):
         window.close()
         self.app.processEvents()
 
+    def test_box_plot_places_files_on_x_axis_and_variable_on_y_axis(self):
+        from pydatview.Tables import Table
+        from pydatview.qt_main import MainWindow
+
+        window = MainWindow()
+        plot_modes = [
+            window.plot_type_combo.itemText(index)
+            for index in range(window.plot_type_combo.count())
+        ]
+        self.assertIn("Box Plot", plot_modes)
+        window.tab_list.append([
+            Table(
+                data=pd.DataFrame({
+                    "Time [s]": [0.0, 1.0, 2.0],
+                    "Load [N]": [1.0, 3.0, 5.0],
+                }),
+                name="first",
+                filename="first.out",
+            ),
+            Table(
+                data=pd.DataFrame({
+                    "Time [s]": [0.0, 1.0, 2.0],
+                    "Load [N]": [2.0, 4.0, 6.0],
+                }),
+                name="second",
+                filename="second.out",
+            ),
+        ])
+        window.populate_tables()
+        pane = window.selector_panes[0]
+        pane.table_list_widget.blockSignals(True)
+        for row in range(pane.table_list_widget.count()):
+            pane.table_list_widget.item(row).setSelected(True)
+        pane.table_list_widget.blockSignals(False)
+        window.on_table_selection_changed(pane)
+        pane.x_combo.setCurrentText("Time [s]")
+        pane.y_list_widget.clearSelection()
+        for row in range(pane.y_list_widget.count()):
+            item = pane.y_list_widget.item(row)
+            if item.text() == "Load [N]":
+                item.setSelected(True)
+
+        window.plot_type_combo.setCurrentText("Box Plot")
+        window.redraw_timer.stop()
+        plot_data = window.build_plot_data()
+
+        self.assertEqual(len(plot_data), 2)
+        np.testing.assert_allclose(plot_data[0].x, [0.0])
+        np.testing.assert_allclose(plot_data[1].x, [1.0])
+        np.testing.assert_allclose(plot_data[0].y, [3.0])
+        np.testing.assert_allclose(plot_data[1].y, [4.0])
+        self.assertEqual(plot_data[0].sx, "File")
+        self.assertEqual(plot_data[0].sy, "Load [N]")
+        self.assertEqual(plot_data[0].boxplot_label, "first.out")
+        self.assertEqual(plot_data[1].boxplot_label, "second.out")
+        self.assertEqual(plot_data[0].boxplot_stats, {
+            "minimum": 1.0,
+            "q1": 2.0,
+            "median": 3.0,
+            "mean": 3.0,
+            "q3": 4.0,
+            "maximum": 5.0,
+        })
+        self.assertFalse(window.swap_xy_check.isEnabled())
+        self.assertFalse(window.logx_check.isEnabled())
+        self.assertFalse(window.logy_check.isEnabled())
+
+        window.canvas.plot_data(plot_data, show_legend=True)
+        ticks = window.canvas._plots[0].getAxis("bottom")._tickLevels
+        self.assertEqual(
+            [label for _position, label in ticks[0]],
+            ["first.out", "second.out"],
+        )
+
+        window.plot_type_combo.setCurrentText("Regular")
+        self.assertTrue(window.swap_xy_check.isEnabled())
+        self.assertTrue(window.logx_check.isEnabled())
+        self.assertTrue(window.logy_check.isEnabled())
+        window.close()
+        self.app.processEvents()
+
+    def test_multiple_loaded_files_match_selected_columns_by_name(self):
+        from pydatview.Tables import Table
+        from pydatview.qt_main import MainWindow
+
+        window = MainWindow()
+        window.tab_list.append([
+            Table(
+                data=pd.DataFrame({
+                    "Time [s]": [0.0, 1.0],
+                    "Load [N]": [10.0, 20.0],
+                    "Other": [100.0, 200.0],
+                }),
+                name="ordered",
+                filename="ordered.out",
+            ),
+            Table(
+                data=pd.DataFrame({
+                    "Time [s]": [0.0, 1.0],
+                    "Other": [300.0, 400.0],
+                    "Load [N]": [30.0, 40.0],
+                }),
+                name="reordered",
+                filename="reordered.out",
+            ),
+        ])
+        window.populate_tables()
+        pane = window.selector_panes[0]
+        pane.table_list_widget.blockSignals(True)
+        for row in range(pane.table_list_widget.count()):
+            pane.table_list_widget.item(row).setSelected(True)
+        pane.table_list_widget.blockSignals(False)
+        window.on_table_selection_changed(pane)
+        pane.x_combo.setCurrentText("Time [s]")
+        pane.y_list_widget.clearSelection()
+        for row in range(pane.y_list_widget.count()):
+            item = pane.y_list_widget.item(row)
+            if item.text() == "Load [N]":
+                item.setSelected(True)
+
+        curves = window.build_plot_data()
+
+        self.assertEqual(len(curves), 2)
+        np.testing.assert_allclose(curves[0].y, [10.0, 20.0])
+        np.testing.assert_allclose(curves[1].y, [30.0, 40.0])
+        np.testing.assert_allclose(curves[1].x, [0.0, 1.0])
+        window.close()
+        self.app.processEvents()
+
+    def test_standardize_units_applies_to_indexed_files_loaded_later(self):
+        from pydatview.qt_main import LazyFileEntry, MainWindow
+
+        window = MainWindow()
+        entry = LazyFileEntry(
+            "future.out",
+            SimpleNamespace(name="FAST output file"),
+            columns=["Time [s]", "Force [N]", "Power [W]"],
+            header_attempted=True,
+        )
+        window.lazy_entries = [entry]
+
+        window.standardize_units("WE", "Wind Energy / OpenFAST")
+
+        self.assertEqual(entry.unit_flavor, "WE")
+        self.assertEqual(
+            entry.columns,
+            ["Time [s]", "Force [kN]", "Power [kW]"],
+        )
+        self.assertIn("indexed file(s)", window.statusBar().currentMessage())
+        window.close()
+        self.app.processEvents()
+
+    def test_active_units_apply_to_regular_add_and_reload(self):
+        from pydatview.qt_main import MainWindow
+
+        with tempfile.TemporaryDirectory() as directory:
+            first_path = os.path.join(directory, "first.csv")
+            second_path = os.path.join(directory, "second.csv")
+            pd.DataFrame({
+                "Time [s]": [0.0, 1.0],
+                "Force [N]": [1000.0, 2000.0],
+            }).to_csv(first_path, index=False)
+            pd.DataFrame({
+                "Time [s]": [0.0, 1.0],
+                "Force [N]": [3000.0, 4000.0],
+            }).to_csv(second_path, index=False)
+
+            window = MainWindow()
+            window.load_files([first_path])
+            window.standardize_units("WE", "Wind Energy / OpenFAST")
+            window.load_files([second_path], add=True)
+
+            self.assertEqual(len(window.tab_list), 2)
+            for tab in window.tab_list:
+                self.assertIn("Force [kN]", tab.data.columns)
+            np.testing.assert_allclose(
+                window.tab_list[1].data["Force [kN]"], [3.0, 4.0]
+            )
+            selected = window.selector_panes[0].table_list_widget.selectedItems()
+            self.assertEqual(len(selected), 2)
+
+            pd.DataFrame({
+                "Time [s]": [0.0, 1.0],
+                "Force [N]": [5000.0, 6000.0],
+            }).to_csv(second_path, index=False)
+            pane = window.selector_panes[0]
+            pane.table_list_widget.clearSelection()
+            pane.table_list_widget.item(1).setSelected(True)
+            window.reload_selected_sources(pane)
+
+            self.assertIn("Force [kN]", window.tab_list[1].data.columns)
+            np.testing.assert_allclose(
+                window.tab_list[1].data["Force [kN]"], [5.0, 6.0]
+            )
+            window.close()
+            self.app.processEvents()
+
+    def test_standardize_units_validates_all_tables_before_changing_any(self):
+        from pydatview.Tables import Table
+        from pydatview.qt_main import MainWindow
+
+        window = MainWindow()
+        good = Table(
+            data=pd.DataFrame({"Force [N]": [1000.0]}),
+            name="good",
+        )
+        bad = Table(
+            data=pd.DataFrame({"Power [W]": ["invalid"]}),
+            name="bad",
+        )
+        window.tab_list.append([good, bad])
+        original = good.data.copy()
+
+        with self.assertRaises(TypeError):
+            window.standardize_units("WE", "Wind Energy / OpenFAST")
+
+        pd.testing.assert_frame_equal(good.data, original)
+        self.assertEqual(window.unit_flavor, "")
+        window.close()
+        self.app.processEvents()
+
     def test_scanned_fast_plot_uses_partial_channel_cache(self):
         import pydatview.io as weio
         from pydatview.Tables import TableList

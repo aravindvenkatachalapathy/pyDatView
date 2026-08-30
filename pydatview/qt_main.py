@@ -72,6 +72,7 @@ from pydatview.qt_stats import (
     _comparison_error,
     _comparison_source,
     _equivalent_loads,
+    box_plot_data,
     _finite_xy,
     _plot_ready_xy,
     _sample_spacing,
@@ -123,6 +124,7 @@ class MainWindow(
         self.selector_panes = []
         self.lazy_batch_total = 0
         self.lazy_batch_done = 0
+        self.unit_flavor = ""
         self.active_selector_pane = None
         self.axis_limits = {key: None for key in ("xmin", "xmax", "ymin", "ymax")}
         self._previous_plot_type = "Regular"
@@ -169,6 +171,7 @@ class MainWindow(
             "Cumulative PSD",
             "PDF",
             "MinMax",
+            "Box Plot",
             "Compare",
         ])
         self.mode_combo = QtWidgets.QComboBox()
@@ -192,7 +195,7 @@ class MainWindow(
         self.line_width_spin = QtWidgets.QDoubleSpinBox()
         self.line_width_spin.setRange(0.25, 8.0)
         self.line_width_spin.setSingleStep(0.25)
-        self.line_width_spin.setValue(1.25)
+        self.line_width_spin.setValue(1.5)
         self.marker_combo = QtWidgets.QComboBox()
         self.marker_combo.addItems(["None", "Circle", "Square", "Triangle", "Diamond"])
         self.axis_limits_button = QtWidgets.QPushButton("Limits")
@@ -1002,6 +1005,10 @@ class MainWindow(
             self.logy_check.blockSignals(False)
         self._previous_plot_type = plot_type
         self.fft_options_panel.setVisible(is_spectral)
+        is_box_plot = plot_type == "Box Plot"
+        self.swap_xy_check.setEnabled(not is_box_plot)
+        self.logx_check.setEnabled(not is_box_plot)
+        self.logy_check.setEnabled(not is_box_plot)
         self.comparison_options_panel.setVisible(plot_type == "Compare")
         self.update_fft_control_states()
         self.on_selection_changed()
@@ -1066,11 +1073,19 @@ class MainWindow(
         if dialog.exec() != QtWidgets.QDialog.Accepted:
             return
         flavor = dialog.target_flavor()
+        try:
+            if flavor == "SI":
+                self.standardize_units_si()
+            else:
+                self.standardize_units_we()
+        except Exception as exc:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Standardize units",
+                "{}: {}".format(type(exc).__name__, exc),
+            )
+            return
         self.settings.setValue("units/target", flavor)
-        if flavor == "SI":
-            self.standardize_units_si()
-        else:
-            self.standardize_units_we()
 
     def standardize_units_we(self):
         self.standardize_units("WE", "Wind Energy / OpenFAST")

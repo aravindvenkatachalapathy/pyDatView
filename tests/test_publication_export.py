@@ -98,6 +98,40 @@ class TestPublicationExport(unittest.TestCase):
                     self.assertIn("Controlled", content)
                     self.assertNotIn("case_01", content)
 
+    def test_export_box_plot_uses_file_ticks(self):
+        from pydatview.qt_publication import (
+            PublicationExportOptions,
+            export_publication_plot,
+        )
+
+        box = SimpleNamespace(
+            x=np.asarray([0.0]),
+            y=np.asarray([3.0]),
+            sx="File",
+            sy="Load [N]",
+            syl="first.out",
+            boxplot_label="first.out",
+            color_index=0,
+            boxplot_stats={
+                "minimum": 1.0,
+                "q1": 2.0,
+                "median": 3.0,
+                "mean": 3.0,
+                "q3": 4.0,
+                "maximum": 5.0,
+            },
+        )
+        with tempfile.TemporaryDirectory() as folder:
+            path = os.path.join(folder, "box.svg")
+            export_publication_plot(
+                [box],
+                PublicationExportOptions(path=path, legend=True),
+            )
+            with open(path, encoding="utf-8") as exported:
+                content = exported.read()
+            self.assertIn("first.out", content)
+            self.assertIn("Load [N]", content)
+
     def test_export_legend_defaults_to_compact_set_names(self):
         from pydatview.qt_publication import (
             PublicationExportOptions,

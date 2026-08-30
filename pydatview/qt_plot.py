@@ -9,22 +9,23 @@ from pydatview.qt_compat import QtCore, QtGui, QtWidgets, pg
 from pydatview.qt_stats import _plot_ready_xy
 
 _PLOT_PALETTE = (
-    (0, 87, 184),     # blue
-    (209, 73, 0),     # vermilion
-    (0, 135, 90),     # green
-    (180, 35, 24),    # red
-    (111, 66, 193),   # purple
-    (0, 124, 145),    # teal
-    (194, 24, 91),    # magenta
-    (138, 90, 0),     # ochre
-    (29, 78, 216),    # royal blue
-    (162, 59, 114),   # berry
-    (46, 125, 50),    # dark green
-    (109, 76, 65),    # brown
-    (0, 96, 100),     # dark cyan
-    (156, 39, 176),   # violet
-    (230, 81, 0),     # burnt orange
-    (55, 65, 81),     # charcoal
+    # Matplotlib's Tableau palette first, followed by distinct extensions.
+    (31, 119, 180),   # tab:blue
+    (255, 127, 14),   # tab:orange
+    (44, 160, 44),    # tab:green
+    (214, 39, 40),    # tab:red
+    (148, 103, 189),  # tab:purple
+    (140, 86, 75),    # tab:brown
+    (227, 119, 194),  # tab:pink
+    (127, 127, 127),  # tab:gray
+    (188, 189, 34),   # tab:olive
+    (23, 190, 207),   # tab:cyan
+    (57, 59, 121),
+    (230, 85, 13),
+    (0, 107, 164),
+    (102, 166, 30),
+    (123, 65, 115),
+    (166, 54, 3),
 )
 
 
@@ -32,11 +33,11 @@ def _curve_color(idx):
     return _PLOT_PALETTE[idx % len(_PLOT_PALETTE)]
 
 
-def _curve_pen(idx, width=1.25):
+def _curve_pen(idx, width=1.5):
     return pg.mkPen(color=_curve_color(idx), width=width)
 
 
-def _selected_curve_pen(width=1.25):
+def _selected_curve_pen(width=1.5):
     return pg.mkPen(color=(17, 24, 39), width=max(width + 2.5, 3.5))
 
 class NumericAxisItem(pg.AxisItem):
@@ -78,7 +79,7 @@ class QtPlotCanvas(pg.GraphicsLayoutWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent=parent)
-        pg.setConfigOptions(useOpenGL=True, antialias=False, background="w", foreground="k")
+        pg.setConfigOptions(useOpenGL=True, antialias=True, background="w", foreground="k")
         self.setBackground("w")
         self.setCursor(QtGui.QCursor(QtCore.Qt.CrossCursor))
         self.setMouseTracking(True)
@@ -181,7 +182,7 @@ class QtPlotCanvas(pg.GraphicsLayoutWidget):
         super().leaveEvent(event)
 
     def plot_data(self, plot_data, *, subplots=False, sharex=True, grid=True,
-                  logx=False, logy=False, show_legend=True, line_width=1.25,
+                  logx=False, logy=False, show_legend=True, line_width=1.5,
                   marker=None, step=False, axis_limits=None):
         # QGraphicsView's OpenGL viewport can crash on Windows when log transforms
         # discard points. Keep accelerated rendering for regular plots.
@@ -216,14 +217,20 @@ class QtPlotCanvas(pg.GraphicsLayoutWidget):
                 pg.ViewBox.RectMode if self._zoom_mode else pg.ViewBox.PanMode
             )
             plot.showGrid(x=grid, y=grid, alpha=0.25)
+            label_style = {
+                "color": "#262626",
+                "font-family": "DejaVu Sans",
+                "font-size": "10pt",
+            }
             ylabel = " and ".join(sorted(set(pd.sy for pd in group)))
             if len(ylabel) < 120:
-                plot.setLabel("left", ylabel)
+                plot.setLabel("left", ylabel, **label_style)
             if i_group == len(groups) - 1:
-                plot.setLabel("bottom", PDL_xlabel(plot_data))
+                plot.setLabel("bottom", PDL_xlabel(plot_data), **label_style)
             if show_legend:
                 plot.addLegend(offset=(10, 10), labelTextColor="k", brush=(255, 255, 255, 210))
 
+            categorical_ticks = []
             for pd in group:
                 try:
                     x, y = _plot_ready_xy(pd.x, pd.y, logx=logx, logy=logy)
@@ -232,22 +239,70 @@ class QtPlotCanvas(pg.GraphicsLayoutWidget):
                     continue
                 if len(x) == 0:
                     continue
-                curve_color = _curve_color(curve_idx)
-                item = plot.plot(
-                    x,
-                    y,
-                    name=pd.syl or pd.sy,
-                    pen=_curve_pen(curve_idx, width=line_width),
-                    symbol=marker,
-                    symbolSize=5 if marker else None,
-                    symbolBrush=curve_color if marker else None,
-                    symbolPen=pg.mkPen(curve_color) if marker else None,
-                    skipFiniteCheck=not (logx or logy),
-                )
+                color_index = getattr(pd, "color_index", curve_idx)
+                curve_color = _curve_color(color_index)
+                box_stats = getattr(pd, "boxplot_stats", None)
+                if box_stats is not None:
+                    center = float(x[0])
+                    box_width = 0.62
+                    outline = pg.mkPen(curve_color, width=max(1.25, line_width))
+                    fill = pg.mkBrush(*curve_color, 105)
+                    box = pg.BarGraphItem(
+                        x=[center],
+                        y0=[box_stats["q1"]],
+                        height=[box_stats["q3"] - box_stats["q1"]],
+                        width=box_width,
+                        pen=outline,
+                        brush=fill,
+                    )
+                    plot.addItem(box)
+                    cap_half_width = box_width * 0.28
+                    segment_x = np.asarray([
+                        center, center, np.nan,
+                        center, center, np.nan,
+                        center - cap_half_width, center + cap_half_width, np.nan,
+                        center - cap_half_width, center + cap_half_width,
+                    ])
+                    segment_y = np.asarray([
+                        box_stats["minimum"], box_stats["q1"], np.nan,
+                        box_stats["q3"], box_stats["maximum"], np.nan,
+                        box_stats["minimum"], box_stats["minimum"], np.nan,
+                        box_stats["maximum"], box_stats["maximum"],
+                    ])
+                    plot.plot(segment_x, segment_y, pen=outline, connect="finite")
+                    plot.plot(
+                        [center - box_width / 2, center + box_width / 2],
+                        [box_stats["median"], box_stats["median"]],
+                        pen=pg.mkPen((30, 30, 30), width=max(1.5, line_width)),
+                    )
+                    item = plot.plot(
+                        [center],
+                        [box_stats["mean"]],
+                        name=pd.syl or pd.sy,
+                        pen=None,
+                        symbol="d",
+                        symbolSize=9,
+                        symbolBrush=pg.mkBrush(curve_color),
+                        symbolPen=pg.mkPen((20, 20, 20), width=1.25),
+                    )
+                    base_pen = pg.mkPen((20, 20, 20), width=1.25)
+                    categorical_ticks.append((center, pd.boxplot_label))
+                else:
+                    item = plot.plot(
+                        x,
+                        y,
+                        name=pd.syl or pd.sy,
+                        pen=_curve_pen(color_index, width=line_width),
+                        symbol=marker,
+                        symbolSize=5 if marker else None,
+                        symbolBrush=curve_color if marker else None,
+                        symbolPen=pg.mkPen(curve_color) if marker else None,
+                        skipFiniteCheck=not (logx or logy),
+                    )
+                    base_pen = _curve_pen(color_index, width=line_width)
                 item.setClipToView(True)
                 item.setDownsampling(auto=True, method="peak")
                 item.setCurveClickable(True, width=8)
-                base_pen = _curve_pen(curve_idx, width=line_width)
                 meta = {
                     "label": pd.syl or pd.sy,
                     "file": getattr(pd, "st", ""),
@@ -258,6 +313,7 @@ class QtPlotCanvas(pg.GraphicsLayoutWidget):
                     "y": getattr(pd, "sy", ""),
                     "points": len(x),
                     "line_width": line_width,
+                    "boxplot": box_stats is not None,
                 }
                 item.sigClicked.connect(lambda clicked_item, _ev, meta=meta: self.select_curve(clicked_item, meta))
                 self._curve_items.append((item, base_pen, meta))
@@ -269,6 +325,15 @@ class QtPlotCanvas(pg.GraphicsLayoutWidget):
                     "y": np.asarray(y),
                 })
                 curve_idx += 1
+
+            if categorical_ticks:
+                bottom_axis = plot.getAxis("bottom")
+                bottom_axis.setTicks([categorical_ticks])
+                bottom_axis.setStyle(
+                    tickTextHeight=42,
+                    autoExpandTextSpace=True,
+                    hideOverlappingLabels=False,
+                )
 
             if logx or logy:
                 plot.setLogMode(x=logx, y=logy)
@@ -448,9 +513,17 @@ class QtPlotCanvas(pg.GraphicsLayoutWidget):
             plot.setYRange(*y_range, padding=0)
 
     def select_curve(self, selected_item, meta):
-        for item, base_pen, _ in self._curve_items:
-            item.setPen(base_pen)
-        selected_item.setPen(_selected_curve_pen(meta.get("line_width", 1.25)))
+        for item, base_pen, item_meta in self._curve_items:
+            if item_meta.get("boxplot"):
+                item.setSymbolPen(base_pen)
+            else:
+                item.setPen(base_pen)
+        if meta.get("boxplot"):
+            selected_item.setSymbolPen(
+                _selected_curve_pen(meta.get("line_width", 1.25))
+            )
+        else:
+            selected_item.setPen(_selected_curve_pen(meta.get("line_width", 1.25)))
         selected_item.setZValue(10)
         for item, _, _ in self._curve_items:
             if item is not selected_item:
@@ -464,12 +537,12 @@ class QtPlotCanvas(pg.GraphicsLayoutWidget):
         plot.showAxis("left", True)
         plot.showAxis("top", True)
         plot.showAxis("right", True)
-        tick_font = QtWidgets.QApplication.font()
-        tick_font.setPointSize(max(8, tick_font.pointSize()))
+        tick_font = QtGui.QFont("DejaVu Sans")
+        tick_font.setPointSize(9)
         for axis_name in ("bottom", "left", "top", "right"):
             axis = plot.getAxis(axis_name)
-            axis.setPen(pg.mkPen("k"))
-            axis.setTextPen(pg.mkPen("k"))
+            axis.setPen(pg.mkPen((38, 38, 38), width=1.0))
+            axis.setTextPen(pg.mkPen((38, 38, 38)))
             axis.setTickFont(tick_font)
             axis.setStyle(showValues=True, tickLength=5, autoExpandTextSpace=False,
                           autoReduceTextSpace=False)
@@ -480,7 +553,7 @@ class QtPlotCanvas(pg.GraphicsLayoutWidget):
         plot.getAxis("top").setStyle(showValues=False)
         plot.getAxis("right").setStyle(showValues=False)
         plot.getViewBox().setBackgroundColor("w")
-        plot.getViewBox().setBorder(pg.mkPen((180, 180, 180)))
+        plot.getViewBox().setBorder(pg.mkPen((38, 38, 38), width=1.0))
 
     @staticmethod
     def _group_plot_data(plot_data, subplots):

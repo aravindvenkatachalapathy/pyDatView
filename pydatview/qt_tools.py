@@ -184,36 +184,40 @@ class QtToolsStatsMixin:
     def standardize_units(self, flavor, label):
         started = time.perf_counter()
         indices = list(range(len(self.tab_list)))
-        if not indices:
+        if not indices and not self.lazy_entries:
             self.statusBar().showMessage("No loaded tables to standardize", 8000)
             return
 
         from pydatview.tools.pandalib import unitConversionPlan
 
         changed = 0
-        plans = {}
-        for it in indices:
-            tab = self.tab_list[it]
-            before = list(tab.data.columns)
-            key = tuple(before)
-            plan = plans.get(key)
-            if plan is None:
-                plan = unitConversionPlan(key, flavor)
-                plans[key] = plan
+        table_plans = self.unit_conversion_plans(
+            [self.tab_list[it] for it in indices], flavor
+        )
+        table_plans = [
+            (tab, list(tab.data.columns), plan)
+            for tab, plan in table_plans
+        ]
+
+        entry_columns = []
+        for entry in self.lazy_entries:
+            converted_columns = (
+                unitConversionPlan(entry.columns, flavor)[0]
+                if entry.columns else []
+            )
+            entry_columns.append((entry, converted_columns))
+
+        for tab, before, plan in table_plans:
             tab.changeUnits(data={"flavor": flavor, "plan": plan})
             after = list(tab.data.columns)
             if before != after:
                 changed += 1
 
-        for entry in self.lazy_entries:
-            if not entry.loaded:
-                continue
+        for entry, converted_columns in entry_columns:
             entry.unit_flavor = flavor
-            if entry.columns:
-                entry.columns = unitConversionPlan(
-                    entry.columns,
-                    flavor,
-                )[0]
+            if converted_columns:
+                entry.columns = converted_columns
+        self.unit_flavor = flavor
 
         for pane in self.visible_selector_panes():
             self.populate_columns(pane)
@@ -222,14 +226,44 @@ class QtToolsStatsMixin:
         if self.live_plot.isChecked() and not self.has_unloaded_lazy_selection():
             self.redraw()
         self.statusBar().showMessage(
-            "Standardized units to {} for {:,} loaded table(s), {:,} changed in {:.3f}s".format(
+            "Standardized units to {} for {:,} loaded table(s), {:,} changed; "
+            "{:,} indexed file(s) will use the same units ({:.3f}s)".format(
                 label,
                 len(indices),
                 changed,
+                len(self.lazy_entries),
                 time.perf_counter() - started,
             ),
             12000,
         )
+
+    @staticmethod
+    def unit_conversion_plans(tabs, flavor):
+        from pydatview.tools.pandalib import (
+            unitConversionPlan,
+            validateUnitConversion,
+        )
+
+        cached = {}
+        result = []
+        for tab in tabs:
+            key = tuple(tab.data.columns)
+            plan = cached.get(key)
+            if plan is None:
+                plan = unitConversionPlan(key, flavor)
+                cached[key] = plan
+            validateUnitConversion(tab.data, plan)
+            result.append((tab, plan))
+        return result
+
+    def apply_active_units_to_tabs(self, tabs):
+        if not self.unit_flavor or not tabs:
+            return
+        for tab, plan in self.unit_conversion_plans(tabs, self.unit_flavor):
+            tab.changeUnits(data={
+                "flavor": self.unit_flavor,
+                "plan": plan,
+            })
 
     def clear(self):
         self.canvas.clear_measurement_marker()

@@ -160,11 +160,20 @@ subplot. Use **View > Auto range** to restore the complete data range.
 Use **View > Increase font size** or **Decrease font size** to adjust interface
 text without changing plot-axis typography.
 
+Interactive plots use Matplotlib's default Tableau color cycle and familiar
+white-background axis styling while retaining PyQtGraph's responsiveness for
+large time series.
+
 The Plot selector includes **Compare**, with Relative, absolute-relative,
 Ratio, Absolute, and Y-Y comparisons against the first selected series in
 each group. Comparison legends show `candidate file - reference file` so the
 direction is explicit. **Swap X-Y** exchanges the displayed axes after the
 selected plot transformation, including Compare, FFT, PDF, and MinMax.
+
+Select a numeric variable in one or more files and choose **Box Plot** to show
+one distribution box per file. The X-axis identifies the files; the Y-axis is
+the selected variable. Each box spans the first and third quartiles, shows the
+median and mean, and uses the full data minimum and maximum as its whiskers.
 
 ## Statistics and FFT
 

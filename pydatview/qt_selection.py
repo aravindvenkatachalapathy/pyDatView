@@ -6,7 +6,11 @@ import numpy as np
 
 from pydatview.plotdata import PlotData
 from pydatview.qt_compat import QtCore, QtWidgets
-from pydatview.qt_stats import compare_plot_data, swap_plot_axes
+from pydatview.qt_stats import (
+    box_plot_data,
+    compare_plot_data,
+    swap_plot_axes,
+)
 
 
 class QtSelectionPlotMixin:
@@ -292,7 +296,7 @@ class QtSelectionPlotMixin:
             ))
             if pane.bladed_project_mode:
                 total_table_count += len({
-                    os.path.abspath(self.tab_list[table_index].filename)
+                    self.normalized_file_path(self.tab_list[table_index].filename)
                     for table_index, _entry in table_sources
                 })
             else:
@@ -321,7 +325,13 @@ class QtSelectionPlotMixin:
                     except ValueError:
                         continue
                 else:
-                    actual_ix = ix
+                    if ix >= len(display_columns):
+                        continue
+                    x_name = display_columns[ix]
+                    try:
+                        actual_ix = tab_columns.index(x_name)
+                    except ValueError:
+                        continue
                 if actual_ix >= len(tab.columns):
                     continue
                 for selection_index, iy in enumerate(y_indices):
@@ -333,7 +343,7 @@ class QtSelectionPlotMixin:
                             actual_iy = tab_columns.index(y_name)
                         except ValueError:
                             continue
-                        curve_key = (os.path.abspath(tab.filename), y_name)
+                        curve_key = (self.normalized_file_path(tab.filename), y_name)
                         if curve_key in seen_project_curves:
                             continue
                         seen_project_curves.add(curve_key)
@@ -346,7 +356,13 @@ class QtSelectionPlotMixin:
                         except ValueError:
                             continue
                     else:
-                        actual_iy = iy
+                        if iy >= len(display_columns):
+                            continue
+                        y_name = display_columns[iy]
+                        try:
+                            actual_iy = tab_columns.index(y_name)
+                        except ValueError:
+                            continue
                     if actual_iy >= len(tab.columns):
                         continue
                     idx = (
@@ -369,7 +385,10 @@ class QtSelectionPlotMixin:
                     else:
                         pd.syl = pd.sy
                     plot_data.append(pd)
-        if self.plot_type_combo.currentText() == "Compare":
+        plot_type = self.plot_type_combo.currentText()
+        if plot_type == "Box Plot":
+            plot_data = box_plot_data(plot_data)
+        elif plot_type == "Compare":
             if len(plot_data) < 2:
                 self.statusBar().showMessage(
                     "Compare requires at least two selected time series", 8000
@@ -378,7 +397,7 @@ class QtSelectionPlotMixin:
             plot_data = compare_plot_data(
                 plot_data, self.comparison_method_combo.currentText()
             )
-        if self.swap_xy_check.isChecked():
+        if self.swap_xy_check.isChecked() and plot_type != "Box Plot":
             for pd in plot_data:
                 swap_plot_axes(pd)
         return plot_data
@@ -452,8 +471,14 @@ class QtSelectionPlotMixin:
                 subplots=self.mode_combo.currentText() == "Subplots",
                 sharex=True,
                 grid=self.grid_check.isChecked(),
-                logx=self.logx_check.isChecked(),
-                logy=self.logy_check.isChecked(),
+                logx=(
+                    self.logx_check.isChecked()
+                    and self.plot_type_combo.currentText() != "Box Plot"
+                ),
+                logy=(
+                    self.logy_check.isChecked()
+                    and self.plot_type_combo.currentText() != "Box Plot"
+                ),
                 show_legend=self.legend_check.isChecked(),
                 line_width=self.line_width_spin.value(),
                 marker=self.marker_symbol(),
@@ -519,7 +544,8 @@ class QtSelectionPlotMixin:
             if (
                 isinstance(data, tuple)
                 and data[0] == "bladed_project"
-                and os.path.abspath(self.tab_list[table_index].filename) == data[1]
+                and self.normalized_file_path(self.tab_list[table_index].filename)
+                == self.normalized_file_path(data[1])
             ):
                 target_row = row
                 break

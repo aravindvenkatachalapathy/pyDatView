@@ -208,13 +208,15 @@ def export_publication_plot(
         )[:, 0]
         curve_index = 0
         for axis, group in zip(axes, groups):
+            box_ticks = []
             for pd in group:
                 x, y = _plot_ready_xy(pd.x, pd.y, logx=logx, logy=logy)
                 if len(x) == 0:
                     continue
                 x, y = _minmax_downsample(x, y, options.max_points)
+                color_index = getattr(pd, "color_index", curve_index)
                 color = np.asarray(
-                    _PLOT_PALETTE[curve_index % len(_PLOT_PALETTE)],
+                    _PLOT_PALETTE[color_index % len(_PLOT_PALETTE)],
                     dtype=float,
                 ) / 255.0
                 label = "Set {}".format(curve_index + 1)
@@ -226,6 +228,40 @@ def export_publication_plot(
                         label = custom_label
                 if options.use_tex:
                     label = _tex_escape(label)
+                box_stats = getattr(pd, "boxplot_stats", None)
+                if box_stats is not None:
+                    center = float(x[0])
+                    artists = axis.bxp(
+                        [{
+                            "label": getattr(pd, "boxplot_label", label),
+                            "whislo": box_stats["minimum"],
+                            "q1": box_stats["q1"],
+                            "med": box_stats["median"],
+                            "mean": box_stats["mean"],
+                            "q3": box_stats["q3"],
+                            "whishi": box_stats["maximum"],
+                            "fliers": [],
+                        }],
+                        positions=[center],
+                        widths=0.62,
+                        showmeans=True,
+                        patch_artist=True,
+                        manage_ticks=False,
+                        boxprops={"facecolor": (*color, 0.42), "edgecolor": color},
+                        whiskerprops={"color": color},
+                        capprops={"color": color},
+                        medianprops={"color": "#1e1e1e", "linewidth": options.line_width},
+                        meanprops={
+                            "marker": "D",
+                            "markerfacecolor": color,
+                            "markeredgecolor": "#141414",
+                            "markersize": 5.0,
+                        },
+                    )
+                    artists["boxes"][0].set_label(label)
+                    box_ticks.append((center, getattr(pd, "boxplot_label", label)))
+                    curve_index += 1
+                    continue
                 markevery = max(1, len(x) // 2000) if marker else None
                 axis.plot(
                     x,
@@ -247,6 +283,11 @@ def export_publication_plot(
             axis.set_ylabel(_tex_escape(ylabel) if options.use_tex else ylabel)
             axis.set_xscale("log" if logx else "linear")
             axis.set_yscale("log" if logy else "linear")
+            if box_ticks:
+                axis.set_xticks(
+                    [position for position, _label in box_ticks],
+                    [label for _position, label in box_ticks],
+                )
             if options.grid:
                 axis.grid(
                     True,
