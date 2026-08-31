@@ -1,6 +1,7 @@
 """Numerical transforms, statistics, and comparison helpers for Qt plots."""
 
 import os
+import re
 
 import numpy as np
 
@@ -74,6 +75,65 @@ _STATS_COLUMNS = (
 _DEFAULT_STATS_COLUMNS = (
     "series", "file", "n", "dt", "mean", "std", "min", "max", "range"
 )
+
+
+_WIND_SPEED_PATTERNS = (
+    re.compile(
+        r"(?:^|[^a-z0-9])(?:ws|wind|windspeed|u|u_ref|uref|uhub|vhub)"
+        r"[-_ ]*([0-9]+(?:[._][0-9]+)?)",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"(?:^|[^0-9])([0-9]+(?:[._][0-9]+)?)"
+        r"[-_ ]*(?:mps|m/s|ms)(?:[^a-z0-9]|$)",
+        re.IGNORECASE,
+    ),
+)
+_SEED_PATTERN = re.compile(
+    r"(?:^|[^a-z0-9])(?:seed|sd|s)[-_ ]*([0-9]+)(?:[^a-z0-9]|$)",
+    re.IGNORECASE,
+)
+
+
+def _parse_filename_number(patterns, name):
+    for pattern in patterns:
+        match = pattern.search(name)
+        if match:
+            return float(match.group(1).replace("_", "."))
+    return None
+
+
+def _parse_seed(name):
+    match = _SEED_PATTERN.search(name)
+    return int(match.group(1)) if match else None
+
+
+def _natural_key(text):
+    return [
+        int(part) if part.isdigit() else part.lower()
+        for part in re.split(r"([0-9]+)", text)
+    ]
+
+
+def _box_plot_sort_key(box):
+    filename = getattr(box, "filename", "") or getattr(box, "st", "")
+    base = os.path.splitext(os.path.basename(filename))[0]
+    wind_speed = _parse_filename_number(_WIND_SPEED_PATTERNS, base)
+    seed = _parse_seed(base)
+    return (
+        wind_speed is None,
+        wind_speed if wind_speed is not None else np.inf,
+        seed is None,
+        seed if seed is not None else np.inf,
+        _natural_key(base),
+        getattr(box, "selection_index", 0),
+    )
+
+
+def _box_plot_wind_speed_label(filename):
+    base = os.path.splitext(os.path.basename(filename))[0]
+    wind_speed = _parse_filename_number(_WIND_SPEED_PATTERNS, base)
+    return "{:g} m/s".format(wind_speed) if wind_speed is not None else None
 
 
 def _series_statistics(pd, x, y, selected):
@@ -303,6 +363,7 @@ def box_plot_data(plot_data):
         )
         for pd in plot_data
     })
+    source_count = len({_comparison_source(pd) for pd in plot_data})
     source_colors = {}
     result = []
     for position, pd in enumerate(plot_data):
@@ -324,10 +385,17 @@ def box_plot_data(plot_data):
         file_label = os.path.basename(filename) if filename else getattr(pd, "st", "")
         if not file_label:
             file_label = getattr(pd, "tabname", "") or "File {}".format(position + 1)
-        tick_label = (
-            "{} | {}".format(file_label, no_unit(pd.sy))
-            if channel_count > 1 else file_label
+        wind_speed_label = (
+            _box_plot_wind_speed_label(file_label)
+            if source_count > 1 else None
         )
+        if wind_speed_label is not None:
+            tick_label = wind_speed_label
+        else:
+            tick_label = (
+                "{} | {}".format(file_label, no_unit(pd.sy))
+                if channel_count > 1 else file_label
+            )
         source = _comparison_source(pd)
         if source not in source_colors:
             source_colors[source] = len(source_colors)
@@ -364,6 +432,9 @@ def box_plot_data(plot_data):
 
     if not result:
         raise ValueError("Box plots need at least one finite numeric series")
+    result = sorted(result, key=_box_plot_sort_key)
+    for position, box in enumerate(result):
+        box.x = np.asarray([float(position)])
     return result
 
 

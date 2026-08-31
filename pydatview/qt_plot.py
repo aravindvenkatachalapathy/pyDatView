@@ -183,7 +183,8 @@ class QtPlotCanvas(pg.GraphicsLayoutWidget):
 
     def plot_data(self, plot_data, *, subplots=False, sharex=True, grid=True,
                   logx=False, logy=False, show_legend=True, line_width=1.5,
-                  marker=None, step=False, axis_limits=None):
+                  marker=None, step=False, axis_limits=None,
+                  order_overlays=None):
         # QGraphicsView's OpenGL viewport can crash on Windows when log transforms
         # discard points. Keep accelerated rendering for regular plots.
         self.useOpenGL(not (logx or logy))
@@ -343,9 +344,69 @@ class QtPlotCanvas(pg.GraphicsLayoutWidget):
                 logx=logx,
                 logy=logy,
             )
+            self._add_order_overlays(plot, order_overlays or [], logx=logx)
 
         if self._measurement_marker_enabled and self._measurement_marker_x is not None:
             self.set_measurement_marker(self._measurement_marker_x)
+
+    @staticmethod
+    def order_marker_positions(rotor_speed, speed_unit="rpm", orders=None, x_type="1/x"):
+        unit = str(speed_unit or "rpm").lower()
+        if unit == "rpm":
+            rotor_frequency = float(rotor_speed) / 60.0
+        elif unit == "hz":
+            rotor_frequency = float(rotor_speed)
+        elif unit in ("rad/s", "radps", "rad_per_s"):
+            rotor_frequency = float(rotor_speed) / (2.0 * np.pi)
+        else:
+            raise ValueError("Unsupported rotor speed unit '{}'".format(speed_unit))
+        if not np.isfinite(rotor_frequency) or rotor_frequency <= 0.0:
+            raise ValueError("Rotor speed must be positive")
+
+        markers = []
+        for order in orders or (1.0, 3.0, 6.0):
+            order = float(order)
+            frequency = order * rotor_frequency
+            if not np.isfinite(frequency) or frequency <= 0.0:
+                continue
+            if x_type == "2pi/x":
+                x = 2.0 * np.pi * frequency
+            elif x_type == "x":
+                x = 1.0 / frequency
+            else:
+                x = frequency
+            markers.append({
+                "x": float(x),
+                "label": "{:g}P".format(order),
+                "frequency": float(frequency),
+            })
+        return markers
+
+    def _add_order_overlays(self, plot, markers, logx=False):
+        if not markers:
+            return
+        for marker in markers:
+            marker_x = float(marker.get("x", np.nan))
+            if not np.isfinite(marker_x) or (logx and marker_x <= 0.0):
+                continue
+            display_x = np.log10(marker_x) if logx else marker_x
+            line = pg.InfiniteLine(
+                pos=display_x,
+                angle=90,
+                movable=False,
+                pen=pg.mkPen((31, 119, 180), width=1.25, style=QtCore.Qt.DotLine),
+                label=str(marker.get("label", "")),
+                labelOpts={
+                    "position": 0.95,
+                    "color": "#1f77b4",
+                    "fill": pg.mkBrush(255, 255, 255, 210),
+                    "movable": False,
+                },
+            )
+            line.setZValue(28)
+            plot.addItem(line, ignoreBounds=True)
+            if getattr(line, "label", None) is not None:
+                line.label.setZValue(29)
 
     @staticmethod
     def _interpolate_curve(x, y, marker_x):

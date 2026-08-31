@@ -7,11 +7,15 @@ import time
 import traceback
 
 import numpy as np
+import pandas as pd
 
 from pydatview.qt_compat import QtCore, QtGui, QtWidgets
 from pydatview.qt_dialogs import (
+    AnalysisResultsDialog,
     AxisLimitsDialog,
     CalculationDialog,
+    ExtremeLoadDialog,
+    FatigueDelDialog,
 )
 from pydatview.qt_math import (
     evaluate_math_expression,
@@ -30,7 +34,264 @@ from pydatview.qt_stats import (
 )
 
 
+_SECONDS_PER_YEAR = 365.25 * 24.0 * 3600.0
+
+
+def _finite_numeric_pair(x_values, y_values):
+    x = np.asarray(x_values, dtype=float)
+    y = np.asarray(y_values, dtype=float)
+    finite = np.isfinite(x) & np.isfinite(y)
+    return x[finite], y[finite]
+
+
+def fatigue_del_tables(tab, time_column, signal_column, m, frequency, lifetime_years, bins):
+    from pydatview.tools.fatigue import equivalent_load
+
+    time_values, signal_values = _finite_numeric_pair(
+        tab.data[time_column].values,
+        tab.data[signal_column].values,
+    )
+    if len(time_values) < 2:
+        raise ValueError("Need at least two finite samples")
+    duration = float(time_values[-1] - time_values[0])
+    if not np.isfinite(duration) or duration <= 0.0:
+        raise ValueError("Time duration must be positive")
+    if frequency <= 0.0:
+        raise ValueError("Equivalent frequency must be positive")
+    teq = 1.0 / float(frequency)
+    leq, ranges, cycles, bin_edges, damage_terms = equivalent_load(
+        time_values,
+        signal_values,
+        m=m,
+        Teq=teq,
+        bins=bins,
+        method="rainflow_windap",
+        outputMore=True,
+    )
+    lifetime_seconds = float(lifetime_years) * _SECONDS_PER_YEAR
+    summary = pd.DataFrame([{
+        "Table": tab.nickname,
+        "Filename": os.path.basename(tab.filename) if tab.filename else "",
+        "Path": os.path.dirname(tab.filename) if tab.filename else "",
+        "Signal": signal_column,
+        "Time": time_column,
+        "S-N slope m": float(m),
+        "Equivalent frequency [Hz]": float(frequency),
+        "Equivalent period [s]": teq,
+        "Lifetime [years]": float(lifetime_years),
+        "Equivalent cycles over lifetime": float(frequency) * lifetime_seconds,
+        "Source duration [s]": duration,
+        "DEL": float(leq),
+    }])
+    rainflow = pd.DataFrame({
+        "Range": np.asarray(ranges, dtype=float),
+        "Cycles": np.asarray(cycles, dtype=float),
+        "Bin lower": np.asarray(bin_edges[:-1], dtype=float),
+        "Bin upper": np.asarray(bin_edges[1:], dtype=float),
+        "DEL damage term": np.asarray(damage_terms, dtype=float),
+    })
+    return summary, rainflow
+
+
+def extreme_load_tables(tables, signal_column, top_n, safety_factor):
+    rows = []
+    for tab in tables:
+        if signal_column not in tab.data.columns:
+            continue
+        values = np.asarray(tab.data[signal_column].values, dtype=float)
+        values = values[np.isfinite(values)]
+        if values.size == 0:
+            continue
+        abs_values = np.abs(values)
+        top_count = min(int(top_n), values.size)
+        top_abs_mean = float(np.mean(np.sort(abs_values)[-top_count:]))
+        max_value = float(np.max(values))
+        min_value = float(np.min(values))
+        abs_extreme = float(abs_values[np.argmax(abs_values)])
+        signed_abs_extreme = float(values[np.argmax(abs_values)])
+        characteristic = float(safety_factor) * abs_extreme
+        rows.append({
+            "Filename": os.path.basename(tab.filename) if tab.filename else tab.nickname,
+            "Path": os.path.dirname(tab.filename) if tab.filename else "",
+            "Table": tab.nickname,
+            "Signal": signal_column,
+            "N": int(values.size),
+            "Max": max_value,
+            "Min": min_value,
+            "Absolute extreme": abs_extreme,
+            "Signed absolute extreme": signed_abs_extreme,
+            "Mean top N absolute": top_abs_mean,
+            "Top N": int(top_count),
+            "Safety factor": float(safety_factor),
+            "Characteristic value": characteristic,
+        })
+    if not rows:
+        raise ValueError("No finite values found for '{}'".format(signal_column))
+
+    detail = pd.DataFrame(rows)
+    metrics = [
+        ("Max", detail["Max"].idxmax()),
+        ("Min", detail["Min"].idxmin()),
+        ("Absolute extreme", detail["Absolute extreme"].idxmax()),
+        ("Mean top N absolute", detail["Mean top N absolute"].idxmax()),
+        ("Characteristic value", detail["Characteristic value"].idxmax()),
+    ]
+    summary_rows = []
+    for metric, row_index in metrics:
+        row = detail.loc[row_index]
+        summary_rows.append({
+            "Metric": metric,
+            "Value": row[metric],
+            "Governing filename": row["Filename"],
+            "Governing path": row["Path"],
+            "Table": row["Table"],
+            "Signal": signal_column,
+            "Safety factor": float(safety_factor),
+            "Top N": int(top_n),
+        })
+    return pd.DataFrame(summary_rows), detail
+
+
 class QtToolsStatsMixin:
+    def _active_loaded_pane(self, title):
+        panes = self.visible_selector_panes()
+        if not panes:
+            return None
+        pane = self.active_selector_pane if self.active_selector_pane in panes else panes[0]
+        unloaded = [
+            lazy_index for lazy_index in self.selected_lazy_indices(pane)
+            if not self.lazy_entries[lazy_index].full_loaded
+        ]
+        if unloaded:
+            QtWidgets.QMessageBox.information(
+                self,
+                title,
+                "Use Load full selected before running this analysis.",
+            )
+            return None
+        return pane
+
+    def _selected_signal_name(self, pane):
+        selected = pane.y_list_widget.selectedItems()
+        return selected[0].text() if selected else None
+
+    def _selected_time_name(self, pane):
+        return pane.x_combo.currentText() if pane.x_combo.count() else None
+
+    def _show_analysis_results(self, title, tables, message):
+        if not hasattr(self, "_analysis_result_windows"):
+            self._analysis_result_windows = []
+        dialog = AnalysisResultsDialog(title, tables, parent=self)
+        dialog.setAttribute(QtCore.Qt.WA_DeleteOnClose, True)
+        dialog.destroyed.connect(
+            lambda _obj=None, d=dialog: (
+                self._analysis_result_windows.remove(d)
+                if d in self._analysis_result_windows else None
+            )
+        )
+        self._analysis_result_windows.append(dialog)
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+        self.statusBar().showMessage(message, 12000)
+
+    def open_fatigue_del_dialog(self):
+        pane = self._active_loaded_pane("Fatigue / DEL analysis")
+        if pane is None:
+            return
+        table_indices = self.selected_table_indices(load=False, pane=pane)
+        if len(table_indices) != 1:
+            QtWidgets.QMessageBox.information(
+                self,
+                "Fatigue / DEL analysis",
+                "Select one loaded table.",
+            )
+            return
+        tab = self.tab_list[table_indices[0]]
+        dialog = FatigueDelDialog(
+            tab.columns,
+            selected_signal=self._selected_signal_name(pane),
+            selected_time=self._selected_time_name(pane),
+            parent=self,
+        )
+        if dialog.exec() != QtWidgets.QDialog.Accepted:
+            return
+        values = dialog.values()
+        try:
+            summary, rainflow = fatigue_del_tables(
+                tab,
+                values["time"],
+                values["signal"],
+                values["m"],
+                values["frequency"],
+                values["lifetime_years"],
+                values["bins"],
+            )
+        except Exception as exc:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Fatigue / DEL analysis",
+                "{}: {}".format(type(exc).__name__, exc),
+            )
+            return
+
+        self._show_analysis_results(
+            "Fatigue / DEL results",
+            [
+                ("Summary", summary),
+                ("Rainflow", rainflow),
+            ],
+            "Calculated DEL and rainflow bins for '{}'".format(values["signal"]),
+        )
+
+    def open_extreme_load_dialog(self):
+        pane = self._active_loaded_pane("ULS / Extreme-load comparison")
+        if pane is None:
+            return
+        table_indices = self.selected_table_indices(load=False, pane=pane)
+        if not table_indices:
+            QtWidgets.QMessageBox.information(
+                self,
+                "ULS / Extreme-load comparison",
+                "Select one or more loaded tables.",
+            )
+            return
+        reference = self.tab_list[table_indices[0]]
+        dialog = ExtremeLoadDialog(
+            reference.columns,
+            selected_signal=self._selected_signal_name(pane),
+            parent=self,
+        )
+        if dialog.exec() != QtWidgets.QDialog.Accepted:
+            return
+        values = dialog.values()
+        try:
+            summary, detail = extreme_load_tables(
+                [self.tab_list[index] for index in table_indices],
+                values["signal"],
+                values["top_n"],
+                values["safety_factor"],
+            )
+        except Exception as exc:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "ULS / Extreme-load comparison",
+                "{}: {}".format(type(exc).__name__, exc),
+            )
+            return
+
+        self._show_analysis_results(
+            "ULS / Extreme-load comparison results",
+            [
+                ("Summary", summary),
+                ("By file", detail),
+            ],
+            "Compared extremes for '{}' across {:,} table(s)".format(
+                values["signal"],
+                len(detail),
+            ),
+        )
+
     def open_calculation_dialog(self):
         panes = self.visible_selector_panes()
         if not panes:

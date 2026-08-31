@@ -20,7 +20,7 @@ class TestGUI(unittest.TestCase):
 
     def test_qt_main_window(self):
         from pydatview.main import MainFrame
-        from pydatview.qt_main import MainWindow
+        from pydatview.qt_main import MainWindow, QtCore
 
         self.assertIs(MainFrame, MainWindow)
         window = MainWindow()
@@ -36,6 +36,16 @@ class TestGUI(unittest.TestCase):
         self.assertEqual(
             window.selector_panes[0].y_list_widget.font().pointSize(),
             max(7, window.font().pointSize() - 1),
+        )
+        window.selector_side_by_side_action.setChecked(True)
+        self.assertEqual(
+            window.selector_panes[0].selector_splitter.orientation(),
+            QtCore.Qt.Horizontal,
+        )
+        window.selector_side_by_side_action.setChecked(False)
+        self.assertEqual(
+            window.selector_panes[0].selector_splitter.orientation(),
+            QtCore.Qt.Vertical,
         )
         initial_font_size = window.font().pointSize()
         window.increase_font_action.trigger()
@@ -62,6 +72,96 @@ class TestGUI(unittest.TestCase):
         )
         self.assertEqual(dialog.add_button.text(), 'Transform file')
         dialog.close()
+
+    def test_duplicate_basenames_show_path_in_table_selector(self):
+        from pydatview.Tables import Table
+        from pydatview.qt_main import MainWindow
+
+        window = MainWindow()
+        window.tab_list.append(Table(
+            data=pd.DataFrame({"Time [s]": [0.0, 1.0], "Load [N]": [1.0, 2.0]}),
+            name="",
+            filename="/tmp/case_a/run.out",
+        ))
+        window.tab_list.append(Table(
+            data=pd.DataFrame({"Time [s]": [0.0, 1.0], "Load [N]": [3.0, 4.0]}),
+            name="",
+            filename="/tmp/case_b/run.out",
+        ))
+        window.populate_tables()
+
+        texts = [
+            window.selector_panes[0].table_list_widget.item(row).text()
+            for row in range(window.selector_panes[0].table_list_widget.count())
+        ]
+        self.assertIn("/tmp/case_a", texts[0])
+        self.assertIn("/tmp/case_b", texts[1])
+        window.close()
+        self.app.processEvents()
+
+    def test_analysis_results_dialog_copies_current_tab(self):
+        from pydatview.qt_dialogs import AnalysisResultsDialog
+
+        dialog = AnalysisResultsDialog(
+            "Results",
+            [
+                ("Summary", pd.DataFrame({"Metric": ["Max"], "Value": [2.0]})),
+                ("Detail", pd.DataFrame({"Filename": ["case.out"], "Max": [2.0]})),
+            ],
+        )
+        dialog.tabs.setCurrentIndex(1)
+        dialog.copy_current_tab()
+
+        text = self.app.clipboard().text()
+        self.assertIn("Filename,Max", text)
+        self.assertIn("case.out,2.0", text)
+        dialog.close()
+
+    def test_fatigue_and_extreme_helpers_create_result_dataframes(self):
+        from pydatview.Tables import Table
+        from pydatview.qt_tools import (
+            extreme_load_tables,
+            fatigue_del_tables,
+        )
+
+        time = np.arange(0.0, 20.0, 0.05)
+        load = 5.0 * np.sin(2.0 * np.pi * time)
+        tab = Table(
+            data=pd.DataFrame({"Time [s]": time, "Load [N]": load}),
+            name="fatigue",
+            filename="/tmp/case_a/fatigue.out",
+        )
+        summary, rainflow = fatigue_del_tables(
+            tab,
+            "Time [s]",
+            "Load [N]",
+            m=4.0,
+            frequency=1.0,
+            lifetime_years=20.0,
+            bins=100,
+        )
+        self.assertEqual(summary.loc[0, "Signal"], "Load [N]")
+        self.assertTrue(np.isfinite(summary.loc[0, "DEL"]))
+        self.assertIn("Range", rainflow.columns)
+        self.assertIn("Cycles", rainflow.columns)
+
+        tab_b = Table(
+            data=pd.DataFrame({"Time [s]": time, "Load [N]": load * 2.0}),
+            name="fatigue_b",
+            filename="/tmp/case_b/fatigue.out",
+        )
+        extreme_summary, extreme_detail = extreme_load_tables(
+            [tab, tab_b],
+            "Load [N]",
+            top_n=10,
+            safety_factor=1.35,
+        )
+        row = extreme_summary[
+            extreme_summary["Metric"] == "Characteristic value"
+        ].iloc[0]
+        self.assertEqual(row["Governing filename"], "fatigue.out")
+        self.assertEqual(row["Governing path"], "/tmp/case_b")
+        self.assertEqual(len(extreme_detail), 2)
 
     def test_3d_netcdf_slices_open_in_side_by_side_selectors(self):
         import xarray as xr
@@ -1321,6 +1421,90 @@ class TestGUI(unittest.TestCase):
         self.assertFalse(window.logy_check.isChecked())
         window.close()
         self.app.processEvents()
+
+    def test_order_tracking_marker_positions_convert_units(self):
+        from pydatview.qt_main import QtPlotCanvas
+
+        markers = QtPlotCanvas.order_marker_positions(
+            12.0,
+            speed_unit="rpm",
+            orders=[1.0, 3.0, 6.0],
+            x_type="1/x",
+        )
+        self.assertEqual([marker["label"] for marker in markers], ["1P", "3P", "6P"])
+        np.testing.assert_allclose(
+            [marker["x"] for marker in markers],
+            [0.2, 0.6, 1.2],
+        )
+
+        cyclic = QtPlotCanvas.order_marker_positions(
+            0.2,
+            speed_unit="Hz",
+            orders=[1.0],
+            x_type="2pi/x",
+        )
+        self.assertAlmostEqual(cyclic[0]["x"], 2.0 * np.pi * 0.2)
+
+        period = QtPlotCanvas.order_marker_positions(
+            2.0 * np.pi * 0.2,
+            speed_unit="rad/s",
+            orders=[1.0],
+            x_type="x",
+        )
+        self.assertAlmostEqual(period[0]["x"], 5.0)
+
+    def test_box_plot_sorts_by_wind_speed_then_seed_in_filename(self):
+        from types import SimpleNamespace
+
+        from pydatview.qt_stats import box_plot_data
+
+        plot_data = [
+            SimpleNamespace(
+                x=np.arange(3.0),
+                y=np.asarray([30.0, 31.0, 32.0]),
+                yIsString=False,
+                yIsDate=False,
+                sy="Load [N]",
+                filename="/tmp/DLC_ws10_seed2.out",
+                st="DLC_ws10_seed2.out",
+                tabname="",
+                pane_index=0,
+                selection_index=0,
+            ),
+            SimpleNamespace(
+                x=np.arange(3.0),
+                y=np.asarray([10.0, 11.0, 12.0]),
+                yIsString=False,
+                yIsDate=False,
+                sy="Load [N]",
+                filename="/tmp/DLC_ws8_seed2.out",
+                st="DLC_ws8_seed2.out",
+                tabname="",
+                pane_index=0,
+                selection_index=0,
+            ),
+            SimpleNamespace(
+                x=np.arange(3.0),
+                y=np.asarray([20.0, 21.0, 22.0]),
+                yIsString=False,
+                yIsDate=False,
+                sy="Load [N]",
+                filename="/tmp/DLC_ws8_seed10.out",
+                st="DLC_ws8_seed10.out",
+                tabname="",
+                pane_index=0,
+                selection_index=0,
+            ),
+        ]
+
+        boxes = box_plot_data(plot_data)
+
+        self.assertEqual(
+            [box.boxplot_label for box in boxes],
+            ["8 m/s", "8 m/s", "10 m/s"],
+        )
+        np.testing.assert_allclose([box.x[0] for box in boxes], [0.0, 1.0, 2.0])
+        np.testing.assert_allclose([box.y[0] for box in boxes], [11.0, 21.0, 31.0])
 
     def test_cumulative_psd_plot_uses_spectral_controls(self):
         from pydatview.Tables import Table

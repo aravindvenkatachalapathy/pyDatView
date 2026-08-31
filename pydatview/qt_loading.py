@@ -502,7 +502,16 @@ class QtLoadingMixin:
     def lazy_loaded_count(self):
         return self.lazy_loaded_total
 
-    def lazy_item_text(self, entry):
+    @staticmethod
+    def source_display_name(path, duplicate_basenames=None):
+        basename = os.path.basename(path) if path else ""
+        duplicate_basenames = duplicate_basenames or set()
+        if basename not in duplicate_basenames:
+            return basename
+        directory = os.path.dirname(path)
+        return "{}  ({})".format(basename, directory) if directory else basename
+
+    def lazy_item_text(self, entry, duplicate_basenames=None):
         if entry.full_loaded:
             state = "loaded"
         elif entry.loaded:
@@ -519,7 +528,12 @@ class QtLoadingMixin:
             state = "indexed"
         size_mb = entry.size / (1024 * 1024) if entry.size else 0.0
         fmt_name = getattr(entry.file_format, "name", "auto")
-        return "{}  [{} | {:.2f} MB | {}]".format(entry.basename, state, size_mb, fmt_name)
+        return "{}  [{} | {:.2f} MB | {}]".format(
+            self.source_display_name(entry.path, duplicate_basenames),
+            state,
+            size_mb,
+            fmt_name,
+        )
 
     def ensure_lazy_header(self, lazy_index):
         entry = self.lazy_entries[lazy_index]
@@ -1183,13 +1197,37 @@ class QtLoadingMixin:
             selected_table_sources=None):
         visible = self.visible_selector_panes()
         names = self.tab_list.getDisplayTabNames() if not self.lazy_entries else []
+        lazy_paths_by_basename = {}
+        for entry in self.lazy_entries:
+            basename = os.path.basename(entry.path)
+            if basename:
+                lazy_paths_by_basename.setdefault(basename, set()).add(
+                    self.normalized_file_path(entry.path)
+                )
+        lazy_duplicate_basenames = {
+            basename for basename, paths in lazy_paths_by_basename.items()
+            if len(paths) > 1
+        }
+        table_paths_by_basename = {}
+        for tab in self.tab_list:
+            basename = os.path.basename(tab.filename) if tab.filename else ""
+            if basename:
+                table_paths_by_basename.setdefault(basename, set()).add(
+                    self.normalized_file_path(tab.filename)
+                )
+        table_duplicate_basenames = {
+            basename for basename, paths in table_paths_by_basename.items()
+            if len(paths) > 1
+        }
         self.lazy_item_widgets = {}
         for pane_index, pane in enumerate(visible):
             pane.table_list_widget.blockSignals(True)
             pane.table_list_widget.clear()
             if self.lazy_entries:
                 for i, entry in enumerate(self.lazy_entries):
-                    item = QtWidgets.QListWidgetItem(self.lazy_item_text(entry))
+                    item = QtWidgets.QListWidgetItem(
+                        self.lazy_item_text(entry, lazy_duplicate_basenames)
+                    )
                     item.setData(QtCore.Qt.UserRole, ("lazy", i))
                     pane.table_list_widget.addItem(item)
                     self.lazy_item_widgets.setdefault(i, []).append(item)
@@ -1205,7 +1243,12 @@ class QtLoadingMixin:
                             1 for candidate in self.tab_list
                             if self.normalized_file_path(candidate.filename) == project_path
                         )
-                        item = QtWidgets.QListWidgetItem(os.path.basename(tab.filename))
+                        item = QtWidgets.QListWidgetItem(
+                            self.source_display_name(
+                                tab.filename,
+                                table_duplicate_basenames,
+                            )
+                        )
                         item.setToolTip("{} Bladed variable groups".format(group_count))
                         item.setData(
                             QtCore.Qt.UserRole,
@@ -1213,7 +1256,18 @@ class QtLoadingMixin:
                         )
                         pane.table_list_widget.addItem(item)
                         continue
-                    item = QtWidgets.QListWidgetItem("{}  ({})".format(names[i], tab.shapestring))
+                    display_name = names[i]
+                    if (
+                        tab.filename
+                        and os.path.basename(tab.filename) in table_duplicate_basenames
+                    ):
+                        display_name = "{}  ({})".format(
+                            display_name,
+                            os.path.dirname(tab.filename),
+                        )
+                    item = QtWidgets.QListWidgetItem(
+                        "{}  ({})".format(display_name, tab.shapestring)
+                    )
                     item.setData(QtCore.Qt.UserRole, ("table", i))
                     pane.table_list_widget.addItem(item)
             restored_selection = False

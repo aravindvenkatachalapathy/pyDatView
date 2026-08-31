@@ -18,9 +18,13 @@ from pydatview.plotdata import PlotData
 import pydatview.io as weio
 from pydatview.qt_compat import QtCore, QtGui, QtWidgets, pg
 from pydatview.qt_dialogs import (
+    AnalysisResultsDialog,
     AxisLimitsDialog,
     CalculationDialog,
     DataFrameModel,
+    ExtremeLoadDialog,
+    FatigueDelDialog,
+    OrderTrackingDialog,
     ScanDialog,
     StandardizeUnitsDialog,
 )
@@ -101,6 +105,9 @@ class MainWindow(
         self.setFont(ui_font)
         self.resize(1280, 820)
         self.settings = QtCore.QSettings("NREL", "pyDatView")
+        self.selector_side_by_side = self.settings.value(
+            "view/selector_side_by_side", False, type=bool
+        )
         self.tab_list = TableList()
         self.file_formats, self.file_format_errors = self._load_file_formats()
         self.plot_data = []
@@ -127,6 +134,16 @@ class MainWindow(
         self.unit_flavor = ""
         self.active_selector_pane = None
         self.axis_limits = {key: None for key in ("xmin", "xmax", "ymin", "ymax")}
+        self.order_tracking_options = {
+            "rotor_speed": self.settings.value(
+                "order_tracking/rotor_speed", 12.1, type=float
+            ),
+            "speed_unit": str(self.settings.value("order_tracking/speed_unit", "rpm")),
+            "orders": str(self.settings.value("order_tracking/orders", "1, 3, 6")),
+        }
+        self.order_tracking_enabled = self.settings.value(
+            "order_tracking/enabled", False, type=bool
+        )
         self._previous_plot_type = "Regular"
         self._regular_logy = False
         self.redraw_timer = QtCore.QTimer(self)
@@ -273,6 +290,11 @@ class MainWindow(
         self.fft_x_combo.addItem("Period [x]", "x")
         self.fft_detrend_check = QtWidgets.QCheckBox("Detrend")
         self.fft_detrend_check.setChecked(False)
+        self.order_tracking_check = QtWidgets.QCheckBox("1P/3P/6P")
+        self.order_tracking_check.setToolTip(
+            "Show order-tracking overlays on spectral plots"
+        )
+        self.order_tracking_check.setChecked(self.order_tracking_enabled)
         self.fft_nexp_spin = QtWidgets.QSpinBox()
         self.fft_nexp_spin.setRange(3, 30)
         self.fft_nexp_spin.setValue(11)
@@ -313,12 +335,13 @@ class MainWindow(
         fft_layout.addWidget(QtWidgets.QLabel("X axis"), 0, 6)
         fft_layout.addWidget(self.fft_x_combo, 0, 7)
         fft_layout.addWidget(self.fft_detrend_check, 0, 8)
+        fft_layout.addWidget(self.order_tracking_check, 0, 9)
         fft_layout.addWidget(QtWidgets.QLabel("Welch 2^n"), 1, 0)
         fft_layout.addWidget(self.fft_nexp_spin, 1, 1)
         fft_layout.addWidget(self.fft_window_length_label, 1, 2, 1, 2)
         fft_layout.addWidget(QtWidgets.QLabel("Bins/decade"), 1, 4)
         fft_layout.addWidget(self.fft_bins_spin, 1, 5)
-        fft_layout.setColumnStretch(9, 1)
+        fft_layout.setColumnStretch(10, 1)
         self.fft_options_panel.setVisible(False)
         root.addWidget(self.fft_options_panel)
 
@@ -510,45 +533,67 @@ class MainWindow(
         layout = QtWidgets.QVBoxLayout(frame)
         layout.setContentsMargins(8, 10, 8, 8)
         layout.setSpacing(6)
+
+        selector_splitter = QtWidgets.QSplitter(
+            QtCore.Qt.Horizontal
+            if self.selector_side_by_side
+            else QtCore.Qt.Vertical
+        )
+        selector_splitter.setChildrenCollapsible(False)
+        layout.addWidget(selector_splitter, 1)
+
+        files_panel = QtWidgets.QWidget()
+        files_layout = QtWidgets.QVBoxLayout(files_panel)
+        files_layout.setContentsMargins(0, 0, 0, 0)
+        files_layout.setSpacing(6)
         tables_label = QtWidgets.QLabel("TABLES")
         tables_label.setProperty("sectionLabel", True)
-        layout.addWidget(tables_label)
+        files_layout.addWidget(tables_label)
         table_list_widget = QtWidgets.QListWidget()
         table_list_widget.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
         table_list_widget.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
         compact_font = QtGui.QFont(self.font())
         compact_font.setPointSize(max(7, self._ui_font_size - 1))
         table_list_widget.setFont(compact_font)
-        layout.addWidget(table_list_widget, 2)
+        files_layout.addWidget(table_list_widget, 1)
+        selector_splitter.addWidget(files_panel)
+
+        variables_panel = QtWidgets.QWidget()
+        variables_layout = QtWidgets.QVBoxLayout(variables_panel)
+        variables_layout.setContentsMargins(0, 0, 0, 0)
+        variables_layout.setSpacing(6)
         bladed_dataset_label = QtWidgets.QLabel("BLADED VARIABLE GROUP")
         bladed_dataset_label.setProperty("sectionLabel", True)
         bladed_dataset_label.setVisible(False)
-        layout.addWidget(bladed_dataset_label)
+        variables_layout.addWidget(bladed_dataset_label)
         bladed_dataset_combo = QtWidgets.QComboBox()
         bladed_dataset_combo.setToolTip("Variable group loaded from the selected Bladed .$PJ project")
         bladed_dataset_combo.setVisible(False)
         bladed_dataset_combo.setFont(compact_font)
-        layout.addWidget(bladed_dataset_combo)
+        variables_layout.addWidget(bladed_dataset_combo)
         x_label = QtWidgets.QLabel("X COLUMN")
         x_label.setProperty("sectionLabel", True)
-        layout.addWidget(x_label)
+        variables_layout.addWidget(x_label)
         column_filter = QtWidgets.QLineEdit()
         column_filter.setPlaceholderText("Filter Y columns")
         column_filter.setClearButtonEnabled(True)
-        layout.addWidget(column_filter)
+        variables_layout.addWidget(column_filter)
         x_combo = QtWidgets.QComboBox()
         x_combo.setFont(compact_font)
-        layout.addWidget(x_combo)
+        variables_layout.addWidget(x_combo)
         y_label = QtWidgets.QLabel("Y COLUMNS")
         y_label.setProperty("sectionLabel", True)
-        layout.addWidget(y_label)
+        variables_layout.addWidget(y_label)
         y_list_widget = QtWidgets.QListWidget()
         y_list_widget.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
         y_list_widget.setFont(compact_font)
-        layout.addWidget(y_list_widget, 3)
+        variables_layout.addWidget(y_list_widget, 1)
+        selector_splitter.addWidget(variables_panel)
+        selector_splitter.setSizes([170, 210])
 
         pane = SelectorPane(
             frame,
+            selector_splitter,
             table_list_widget,
             bladed_dataset_label,
             bladed_dataset_combo,
@@ -582,6 +627,22 @@ class MainWindow(
             self.x_combo = x_combo
             self.y_list_widget = y_list_widget
         return pane
+
+    def set_selector_side_by_side(self, enabled):
+        self.selector_side_by_side = bool(enabled)
+        self.settings.setValue(
+            "view/selector_side_by_side",
+            self.selector_side_by_side,
+        )
+        orientation = (
+            QtCore.Qt.Horizontal
+            if self.selector_side_by_side
+            else QtCore.Qt.Vertical
+        )
+        for pane in self.selector_panes:
+            pane.selector_splitter.setOrientation(orientation)
+            pane.selector_splitter.setSizes([170, 210])
+        self.resize_compare_region()
 
     def compare_pane_count(self):
         text = self.compare_combo.currentText()
@@ -920,6 +981,15 @@ class MainWindow(
         self.axis_limits_action = view_menu.addAction("Axis limits")
         self.axis_limits_action.triggered.connect(self.open_axis_limits_dialog)
         view_menu.addSeparator()
+        self.selector_side_by_side_action = view_menu.addAction(
+            "Files and variables side by side"
+        )
+        self.selector_side_by_side_action.setCheckable(True)
+        self.selector_side_by_side_action.setChecked(self.selector_side_by_side)
+        self.selector_side_by_side_action.toggled.connect(
+            self.set_selector_side_by_side
+        )
+        view_menu.addSeparator()
         self.increase_font_action = view_menu.addAction("Increase font size")
         self.increase_font_action.setShortcuts([
             QtGui.QKeySequence("Ctrl++"),
@@ -947,6 +1017,11 @@ class MainWindow(
         tools_menu.addSeparator()
         self.math_action = tools_menu.addAction("Mathematical operation")
         self.math_action.triggered.connect(self.open_calculation_dialog)
+        tools_menu.addSeparator()
+        self.fatigue_del_action = tools_menu.addAction("Fatigue / DEL analysis...")
+        self.fatigue_del_action.triggered.connect(self.open_fatigue_del_dialog)
+        self.extreme_load_action = tools_menu.addAction("ULS / Extreme-load comparison...")
+        self.extreme_load_action.triggered.connect(self.open_extreme_load_dialog)
 
     def _connect(self):
         self.plot_type_combo.currentIndexChanged.connect(self.on_plot_type_changed)
@@ -987,6 +1062,7 @@ class MainWindow(
         ):
             combo.currentIndexChanged.connect(self.on_fft_options_changed)
         self.fft_detrend_check.stateChanged.connect(self.on_fft_options_changed)
+        self.order_tracking_check.toggled.connect(self.on_order_tracking_toggled)
         self.fft_nexp_spin.valueChanged.connect(self.on_fft_options_changed)
         self.fft_bins_spin.valueChanged.connect(self.on_fft_options_changed)
 
@@ -1038,9 +1114,82 @@ class MainWindow(
         self.fft_window_combo.setEnabled(averaging == "Welch")
         self.fft_nexp_spin.setEnabled(averaging == "Welch")
         self.fft_bins_spin.setEnabled(averaging == "Binning")
+        self.order_tracking_check.setEnabled(
+            self.plot_type_combo.currentText() in ("FFT", "Cumulative PSD")
+        )
         self.fft_window_length_label.setText(
             "{:,} samples".format(2 ** self.fft_nexp_spin.value())
         )
+
+    @staticmethod
+    def _parse_order_values(text):
+        orders = []
+        for part in str(text).replace(";", ",").split(","):
+            part = part.strip()
+            if not part:
+                continue
+            value = float(part)
+            if np.isfinite(value) and value > 0.0 and value not in orders:
+                orders.append(value)
+        return orders
+
+    def order_overlay_markers(self):
+        if (
+            not self.order_tracking_enabled
+            or self.plot_type_combo.currentText() not in ("FFT", "Cumulative PSD")
+        ):
+            return []
+        x_type = (
+            "1/x"
+            if self.plot_type_combo.currentText() == "Cumulative PSD"
+            else self.fft_x_combo.currentData()
+        )
+        try:
+            return QtPlotCanvas.order_marker_positions(
+                self.order_tracking_options["rotor_speed"],
+                speed_unit=self.order_tracking_options["speed_unit"],
+                orders=self._parse_order_values(
+                    self.order_tracking_options["orders"]
+                ),
+                x_type=x_type,
+            )
+        except ValueError as exc:
+            self.statusBar().showMessage(str(exc), 8000)
+            return []
+
+    def on_order_tracking_toggled(self, enabled):
+        if enabled:
+            dialog = OrderTrackingDialog(
+                options=self.order_tracking_options,
+                parent=self,
+            )
+            if dialog.exec() != QtWidgets.QDialog.Accepted:
+                self.order_tracking_check.blockSignals(True)
+                self.order_tracking_check.setChecked(False)
+                self.order_tracking_check.blockSignals(False)
+                self.order_tracking_enabled = False
+                self.settings.setValue("order_tracking/enabled", False)
+                self.on_selection_changed()
+                return
+            self.order_tracking_options = dialog.values()
+            self.settings.setValue(
+                "order_tracking/rotor_speed",
+                self.order_tracking_options["rotor_speed"],
+            )
+            self.settings.setValue(
+                "order_tracking/speed_unit",
+                self.order_tracking_options["speed_unit"],
+            )
+            self.settings.setValue(
+                "order_tracking/orders",
+                self.order_tracking_options["orders"],
+            )
+        self.order_tracking_enabled = bool(enabled)
+        self.settings.setValue(
+            "order_tracking/enabled",
+            self.order_tracking_enabled,
+        )
+        self.on_selection_changed()
 
     def on_fft_options_changed(self, _value=None):
         self.update_fft_control_states()

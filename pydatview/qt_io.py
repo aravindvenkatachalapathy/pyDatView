@@ -40,6 +40,7 @@ class LazyFileEntry:
 @dataclass
 class SelectorPane:
     frame: object
+    selector_splitter: object
     table_list_widget: object
     bladed_dataset_label: object
     bladed_dataset_combo: object

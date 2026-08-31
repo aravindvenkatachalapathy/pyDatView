@@ -483,6 +483,7 @@ class QtSelectionPlotMixin:
                 line_width=self.line_width_spin.value(),
                 marker=self.marker_symbol(),
                 axis_limits=self.axis_limits,
+                order_overlays=self.order_overlay_markers(),
             )
             n_curves = len(self.plot_data)
             n_points = sum(len(pd.y) for pd in self.plot_data)

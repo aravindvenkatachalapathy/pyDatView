@@ -4,7 +4,7 @@ import os
 
 import numpy as np
 
-from pydatview.qt_compat import QtCore, QtWidgets
+from pydatview.qt_compat import QtCore, QtGui, QtWidgets
 from pydatview.qt_io import _format_specs, _parse_bladed_suffixes
 from pydatview.qt_math import _MATH_FUNCTIONS, _TABLE_TRANSFORMS
 
@@ -292,6 +292,246 @@ class AxisLimitsDialog(QtWidgets.QDialog):
 
     def values(self):
         return dict(self._limits)
+
+
+class FatigueDelDialog(QtWidgets.QDialog):
+    def __init__(self, columns, selected_signal=None, selected_time=None, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Fatigue / DEL analysis")
+        self.setMinimumWidth(430)
+        self._columns = [str(column) for column in columns]
+
+        root = QtWidgets.QVBoxLayout(self)
+        form = QtWidgets.QFormLayout()
+        root.addLayout(form)
+
+        self.signal_combo = QtWidgets.QComboBox()
+        self.time_combo = QtWidgets.QComboBox()
+        for column in self._columns:
+            self.signal_combo.addItem(column)
+            self.time_combo.addItem(column)
+        if selected_signal in self._columns:
+            self.signal_combo.setCurrentIndex(self._columns.index(selected_signal))
+        else:
+            for row, column in enumerate(self._columns):
+                if not column.lower().startswith("index"):
+                    self.signal_combo.setCurrentIndex(row)
+                    break
+        if selected_time in self._columns:
+            self.time_combo.setCurrentIndex(self._columns.index(selected_time))
+        else:
+            for row, column in enumerate(self._columns):
+                lower = column.lower()
+                if lower.startswith("time") or lower == "t" or lower.startswith("t_["):
+                    self.time_combo.setCurrentIndex(row)
+                    break
+        form.addRow("Signal", self.signal_combo)
+        form.addRow("Time", self.time_combo)
+
+        self.slope_spin = QtWidgets.QDoubleSpinBox()
+        self.slope_spin.setRange(0.1, 50.0)
+        self.slope_spin.setDecimals(3)
+        self.slope_spin.setValue(4.0)
+        form.addRow("S-N slope m", self.slope_spin)
+
+        self.frequency_spin = QtWidgets.QDoubleSpinBox()
+        self.frequency_spin.setRange(1e-9, 1e9)
+        self.frequency_spin.setDecimals(6)
+        self.frequency_spin.setValue(1.0)
+        self.frequency_spin.setSuffix(" Hz")
+        form.addRow("Equivalent frequency", self.frequency_spin)
+
+        self.lifetime_spin = QtWidgets.QDoubleSpinBox()
+        self.lifetime_spin.setRange(0.0, 1e12)
+        self.lifetime_spin.setDecimals(3)
+        self.lifetime_spin.setValue(20.0)
+        self.lifetime_spin.setSuffix(" years")
+        form.addRow("Lifetime", self.lifetime_spin)
+
+        self.bins_spin = QtWidgets.QSpinBox()
+        self.bins_spin.setRange(4, 4096)
+        self.bins_spin.setValue(100)
+        form.addRow("Rainflow bins", self.bins_spin)
+
+        buttons = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Cancel)
+        self.calculate_button = buttons.addButton(
+            "Calculate", QtWidgets.QDialogButtonBox.AcceptRole
+        )
+        self.calculate_button.setObjectName("primaryButton")
+        root.addWidget(buttons)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+
+    def values(self):
+        return {
+            "signal": self.signal_combo.currentText(),
+            "time": self.time_combo.currentText(),
+            "m": self.slope_spin.value(),
+            "frequency": self.frequency_spin.value(),
+            "lifetime_years": self.lifetime_spin.value(),
+            "bins": self.bins_spin.value(),
+        }
+
+
+class ExtremeLoadDialog(QtWidgets.QDialog):
+    def __init__(self, columns, selected_signal=None, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("ULS / Extreme-load comparison")
+        self.setMinimumWidth(390)
+        self._columns = [str(column) for column in columns]
+
+        root = QtWidgets.QVBoxLayout(self)
+        form = QtWidgets.QFormLayout()
+        root.addLayout(form)
+
+        self.signal_combo = QtWidgets.QComboBox()
+        for column in self._columns:
+            self.signal_combo.addItem(column)
+        if selected_signal in self._columns:
+            self.signal_combo.setCurrentIndex(self._columns.index(selected_signal))
+        else:
+            for row, column in enumerate(self._columns):
+                if not column.lower().startswith("index"):
+                    self.signal_combo.setCurrentIndex(row)
+                    break
+        form.addRow("Signal", self.signal_combo)
+
+        self.top_n_spin = QtWidgets.QSpinBox()
+        self.top_n_spin.setRange(1, 1000000)
+        self.top_n_spin.setValue(10)
+        form.addRow("Top N", self.top_n_spin)
+
+        self.safety_factor_spin = QtWidgets.QDoubleSpinBox()
+        self.safety_factor_spin.setRange(0.0, 1000.0)
+        self.safety_factor_spin.setDecimals(4)
+        self.safety_factor_spin.setValue(1.35)
+        form.addRow("Safety factor", self.safety_factor_spin)
+
+        buttons = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Cancel)
+        self.compare_button = buttons.addButton(
+            "Compare", QtWidgets.QDialogButtonBox.AcceptRole
+        )
+        self.compare_button.setObjectName("primaryButton")
+        root.addWidget(buttons)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+
+    def values(self):
+        return {
+            "signal": self.signal_combo.currentText(),
+            "top_n": self.top_n_spin.value(),
+            "safety_factor": self.safety_factor_spin.value(),
+        }
+
+
+class AnalysisResultsDialog(QtWidgets.QDialog):
+    def __init__(self, title, tables, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        self.resize(860, 520)
+        self._models = []
+
+        root = QtWidgets.QVBoxLayout(self)
+        self.tabs = QtWidgets.QTabWidget()
+        root.addWidget(self.tabs, 1)
+
+        for label, dataframe in tables:
+            view = QtWidgets.QTableView()
+            model = DataFrameModel(dataframe, max_rows=max(200, len(dataframe)))
+            self._models.append(model)
+            view.setModel(model)
+            view.setAlternatingRowColors(True)
+            view.setSortingEnabled(False)
+            view.resizeColumnsToContents()
+            self.tabs.addTab(view, label)
+
+        buttons = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Close)
+        self.copy_button = buttons.addButton(
+            "Copy current tab", QtWidgets.QDialogButtonBox.ActionRole
+        )
+        root.addWidget(buttons)
+        buttons.rejected.connect(self.close)
+        self.copy_button.clicked.connect(self.copy_current_tab)
+
+    def copy_current_tab(self):
+        index = self.tabs.currentIndex()
+        if index < 0 or index >= len(self._models):
+            return
+        dataframe = self._models[index].dataframe
+        if dataframe is None:
+            return
+        QtWidgets.QApplication.clipboard().setText(dataframe.to_csv(index=False))
+
+
+class OrderTrackingDialog(QtWidgets.QDialog):
+    def __init__(self, options=None, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Order tracking overlays")
+        self.setMinimumWidth(390)
+        options = dict(options or {})
+
+        root = QtWidgets.QVBoxLayout(self)
+        form = QtWidgets.QFormLayout()
+        root.addLayout(form)
+
+        self.rotor_speed_spin = QtWidgets.QDoubleSpinBox()
+        self.rotor_speed_spin.setRange(1e-9, 1e9)
+        self.rotor_speed_spin.setDecimals(6)
+        self.rotor_speed_spin.setValue(float(options.get("rotor_speed", 12.1)))
+        form.addRow("Rated rotor speed", self.rotor_speed_spin)
+
+        self.speed_unit_combo = QtWidgets.QComboBox()
+        self.speed_unit_combo.addItem("rpm", "rpm")
+        self.speed_unit_combo.addItem("Hz", "hz")
+        self.speed_unit_combo.addItem("rad/s", "rad/s")
+        unit = str(options.get("speed_unit", "rpm"))
+        unit_index = self.speed_unit_combo.findData(unit)
+        self.speed_unit_combo.setCurrentIndex(max(0, unit_index))
+        form.addRow("Speed unit", self.speed_unit_combo)
+
+        self.orders_edit = QtWidgets.QLineEdit()
+        self.orders_edit.setText(str(options.get("orders", "1, 3, 6")))
+        form.addRow("Orders", self.orders_edit)
+
+        buttons = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel
+        )
+        root.addWidget(buttons)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+
+    @staticmethod
+    def _parse_orders(text):
+        values = []
+        for part in text.replace(";", ",").split(","):
+            part = part.strip()
+            if not part:
+                continue
+            value = float(part)
+            if not np.isfinite(value) or value <= 0.0:
+                raise ValueError("Orders must be positive finite numbers")
+            if value not in values:
+                values.append(value)
+        if not values:
+            raise ValueError("Enter at least one order")
+        return values
+
+    def accept(self):
+        try:
+            self._parse_orders(self.orders_edit.text())
+        except ValueError as exc:
+            QtWidgets.QMessageBox.warning(self, "Order tracking overlays", str(exc))
+            self.orders_edit.setFocus()
+            return
+        super().accept()
+
+    def values(self):
+        orders = self._parse_orders(self.orders_edit.text())
+        return {
+            "rotor_speed": float(self.rotor_speed_spin.value()),
+            "speed_unit": self.speed_unit_combo.currentData(),
+            "orders": ", ".join("{:g}".format(order) for order in orders),
+        }
 
 
 class StandardizeUnitsDialog(QtWidgets.QDialog):
