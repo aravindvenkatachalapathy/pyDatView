@@ -54,6 +54,7 @@ def fileFormats(userpath=None, ignoreErrors=False, verbose=False):
     from .flex_blade_file         import FLEXBladeFile
     from .flex_profile_file       import FLEXProfileFile
     from .flex_out_file           import FLEXOutFile
+    from .flex_legacy_out_file    import FLEXLegacyOutFile
     from .flex_doc_file           import FLEXDocFile
     from .flex_wavekin_file       import FLEXWaveKinFile
     from .excel_file              import ExcelFile
@@ -99,6 +100,7 @@ def fileFormats(userpath=None, ignoreErrors=False, verbose=False):
     addFormat(40, FileFormat(FLEXBladeFile))
     addFormat(40, FileFormat(FLEXProfileFile))
     addFormat(40, FileFormat(FLEXOutFile))
+    addFormat(40, FileFormat(FLEXLegacyOutFile))
     addFormat(40, FileFormat(FLEXWaveKinFile))
     addFormat(40, FileFormat(FLEXDocFile))
     addFormat(50, FileFormat(BModesOutFile))

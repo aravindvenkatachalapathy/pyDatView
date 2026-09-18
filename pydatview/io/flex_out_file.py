@@ -86,6 +86,8 @@ def ReadReflex(
         # Header
         # -----------------------------------------------------------------
         head = split_off_by_pattern(fid)
+        if 1 not in head or b"\xff\xff\xff\xff" not in head[1]:
+            raise WrongFormatError("Not a newer FLEX output file")
 
         # Example: 8620, often related to the following block length.
         other1 = np.fromfile(
@@ -458,7 +460,7 @@ class FLEXOutFile(File):
 
     @staticmethod
     def defaultExtensions():
-        return [".res", ".int"]
+        return [".res", ".int", ".int_*"]
 
     @staticmethod
     def formatName():

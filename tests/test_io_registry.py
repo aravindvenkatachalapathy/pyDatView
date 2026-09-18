@@ -1,5 +1,6 @@
 import importlib
 import os
+import struct
 import sys
 import tempfile
 import unittest
@@ -61,6 +62,33 @@ class TestIORegistry(unittest.TestCase):
             file_format, file_object = weio.detectFormat(path)
             self.assertEqual(file_format.name, 'FLEX profile file')
             self.assertEqual(len(file_object.toDataFrame()), 1)
+
+    def test_versioned_flex_outputs_and_legacy_reader(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            modern = os.path.join(temp_dir, 'modern.int_2')
+            with open(modern, 'wb') as stream:
+                stream.write(b'header\xff\xff\xff\xffblock\xff\xff\xff\xff')
+                stream.write(struct.pack('<5i', 0, 1, 7, 2, 0))
+                for value in (b'Load\x00', b'N\x00', b'OK\x00'):
+                    stream.write(struct.pack('<i', len(value)))
+                    stream.write(value)
+                stream.write(struct.pack('<iff', 0, 1.0, 0.5))
+                stream.write(struct.pack('<ff2H', 10.0, 2.0, 3, 4))
+            fmt, obj = weio.detectFormat(modern)
+            self.assertEqual(fmt.name, 'FLEX output file')
+            self.assertEqual(obj.toDataFrame()['Load_[N]'].tolist(), [16.0, 18.0])
+
+            legacy = os.path.join(temp_dir, 'legacy.int_3')
+            with open(legacy, 'wb') as stream:
+                stream.write(struct.pack('<i6i', 0, 1, 1, 2020, 1, 0, 0))
+                stream.write(b'Legacy'.ljust(40, b' '))
+                stream.write(struct.pack('<2i', 0, 0))
+                stream.write(struct.pack('<3i', 1, 7, 0))
+                stream.write(struct.pack('<ifff', 2, 1.0, 0.5, 2.0))
+                stream.write(struct.pack('<2h', 3, 4))
+            fmt, obj = weio.detectFormat(legacy)
+            self.assertEqual(fmt.name, 'FLEX legacy output file')
+            self.assertEqual(obj.toDataFrame()['S0001_[NA]'].tolist(), [6.0, 8.0])
 
     def test_generic_matlab_file_loads_after_raaw_probe(self):
         with tempfile.TemporaryDirectory() as temp_dir:
