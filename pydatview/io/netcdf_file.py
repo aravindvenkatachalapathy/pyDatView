@@ -339,6 +339,103 @@ class NetCDFFile(File):
     def get_numpy_plot_data(self, table_name=''):
         return getattr(self, '_native_plot_sources', {}).get(table_name)
 
+    def plottable_variables(self):
+        """Describe array variables available to the interactive slicer."""
+        result = {}
+        for name, variable in self.data.variables.items():
+            if variable.ndim:
+                result[str(name)] = {
+                    'dimensions': tuple(map(str, variable.dims)),
+                    'shape': tuple(map(int, variable.shape)),
+                    'dtype': str(variable.dtype),
+                    'coordinate': name in self.data.coords,
+                }
+        return result
+
+    def dimension_labels(self, variable_name, dimension):
+        """Return display labels without changing the underlying coordinates."""
+        variable = self.data[variable_name]
+        return [
+            self._coordinate_text(value)
+            for value in self._dimension_values(variable, dimension)
+        ]
+
+    def slice_to_dataframe(
+            self,
+            variable_name,
+            x_dimension,
+            series_dimension=None,
+            fixed_indices=None,
+            x_range=None):
+        """Create a directly plottable table from an xarray variable slice.
+
+        Remaining dimensions must be fixed by integer position.  Keeping the
+        selection in this reader makes the Qt dialog a thin UI and leaves the
+        xarray operations independently testable.
+        """
+        if variable_name not in self.data.variables:
+            raise KeyError("Unknown NetCDF variable '{}'".format(variable_name))
+        variable = self.data[variable_name]
+        if x_dimension not in variable.dims:
+            raise ValueError("X dimension '{}' is not used by '{}'".format(
+                x_dimension, variable_name,
+            ))
+        if series_dimension == x_dimension:
+            raise ValueError('X and series dimensions must be different')
+        if series_dimension is not None and series_dimension not in variable.dims:
+            raise ValueError("Series dimension '{}' is not used by '{}'".format(
+                series_dimension, variable_name,
+            ))
+
+        retained = {x_dimension}
+        if series_dimension is not None:
+            retained.add(series_dimension)
+        fixed_indices = dict(fixed_indices or {})
+        missing = [dim for dim in variable.dims if dim not in retained and dim not in fixed_indices]
+        if missing:
+            raise ValueError('Select a value for dimension(s): {}'.format(', '.join(missing)))
+        invalid = set(fixed_indices).difference(variable.dims)
+        if invalid:
+            raise ValueError('Unknown dimension(s): {}'.format(', '.join(sorted(invalid))))
+
+        selected = variable.isel(fixed_indices, drop=True)
+        if x_range is not None:
+            start, stop = map(int, x_range)
+            if start > stop:
+                start, stop = stop, start
+            selected = selected.isel({x_dimension: slice(start, stop + 1)})
+        order = [x_dimension]
+        if series_dimension is not None:
+            order.append(series_dimension)
+        selected = selected.transpose(*order)
+        x_values = self._dimension_values(selected, x_dimension)
+        columns = {str(x_dimension): x_values}
+        if series_dimension is None:
+            columns[str(variable_name)] = np.asarray(selected.values)
+        else:
+            series_values = self._dimension_values(selected, series_dimension)
+            matrix = np.asarray(selected.values)
+            for index, value in enumerate(series_values):
+                label = '{} [{}={}]'.format(
+                    variable_name,
+                    series_dimension,
+                    self._coordinate_text(value),
+                )
+                if label in columns:
+                    label = '{} [index={}]'.format(label, index)
+                columns[label] = matrix[:, index]
+        frame = pd.DataFrame(columns)
+        frame.attrs['pydatview'] = {
+            'netcdf_interactive_slice': True,
+            'source_variable': str(variable_name),
+            'x_dimension': str(x_dimension),
+            'series_dimension': (
+                None if series_dimension is None else str(series_dimension)
+            ),
+            'fixed_indices': dict(fixed_indices),
+        }
+        return frame
+
     def _toDataFrame(self):
         """Return value-preserving tabular views for the data variables.
 

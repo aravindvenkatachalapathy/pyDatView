@@ -13,7 +13,7 @@ from collections import deque
 
 import numpy as np
 
-from pydatview.Tables import TableList
+from pydatview.Tables import Table, TableList
 from pydatview.plotdata import PlotData
 import pydatview.io as weio
 from pydatview.qt_compat import QtCore, QtGui, QtWidgets, pg
@@ -86,6 +86,7 @@ from pydatview.qt_stats import (
     swap_plot_axes,
 )
 from pydatview.qt_loading import QtLoadingMixin
+from pydatview.qt_netcdf import NetCDFSliceDialog
 from pydatview.qt_selection import QtSelectionPlotMixin
 from pydatview.qt_tools import QtToolsStatsMixin
 from pydatview.qt_theme import configure_application, windows_stylesheet
@@ -1010,6 +1011,9 @@ class MainWindow(
         view_export_plot_action.triggered.connect(self.export_plot_image)
 
         tools_menu = self.menuBar().addMenu("&Tools")
+        self.netcdf_slice_action = tools_menu.addAction("NetCDF slice...")
+        self.netcdf_slice_action.triggered.connect(self.open_netcdf_slice_dialog)
+        tools_menu.addSeparator()
         self.standardize_units_action = tools_menu.addAction("Standardize units...")
         self.standardize_units_action.triggered.connect(
             self.open_standardize_units_dialog
@@ -1235,6 +1239,51 @@ class MainWindow(
             )
             return
         self.settings.setValue("units/target", flavor)
+
+    def open_netcdf_slice_dialog(self):
+        indices = self.selected_table_indices(show_warning=True)
+        netcdf_table = next((
+            self.tab_list[index]
+            for index in indices
+            if self.tab_list[index].fileformat_name == 'NetCDF file'
+            and hasattr(self.tab_list[index].fileobject, 'slice_to_dataframe')
+        ), None)
+        if netcdf_table is None:
+            QtWidgets.QMessageBox.information(
+                self,
+                'NetCDF slice',
+                'Select a loaded NetCDF table first.',
+            )
+            return
+        dialog = NetCDFSliceDialog(netcdf_table.fileobject, parent=self)
+        if dialog.exec() != QtWidgets.QDialog.Accepted:
+            return
+        try:
+            frame = netcdf_table.fileobject.slice_to_dataframe(
+                **dialog.selection()
+            )
+            table = Table(
+                data=frame,
+                name=dialog.slice_name(),
+                filename=netcdf_table.filename,
+                fileformat=netcdf_table.fileformat,
+                fileobject=netcdf_table.fileobject,
+            )
+        except Exception as exc:
+            QtWidgets.QMessageBox.warning(
+                self,
+                'NetCDF slice',
+                '{}: {}'.format(type(exc).__name__, exc),
+            )
+            return
+        self.tab_list.append(table)
+        new_index = len(self.tab_list) - 1
+        self.populate_tables(selected_table_indices=[new_index])
+        self.on_table_selection_changed()
+        self.statusBar().showMessage(
+            "Added NetCDF slice '{}'".format(table.nickname),
+            5000,
+        )
 
     def standardize_units_we(self):
         self.standardize_units("WE", "Wind Energy / OpenFAST")

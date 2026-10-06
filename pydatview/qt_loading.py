@@ -899,6 +899,14 @@ class QtLoadingMixin:
         self.active_selector_pane = pane
 
         menu = QtWidgets.QMenu(pane.table_list_widget)
+        selected_indices = self.selected_table_indices(load=False, pane=pane)
+        can_slice_netcdf = any(
+            self.tab_list[index].fileformat_name == 'NetCDF file'
+            for index in selected_indices
+        )
+        slice_action = menu.addAction("Create NetCDF slice...")
+        slice_action.setEnabled(can_slice_netcdf)
+        menu.addSeparator()
         remove_action = menu.addAction("Remove from pyDatView")
         reload_action = menu.addAction("Reload")
         location_action = menu.addAction("Open file location")
@@ -906,7 +914,9 @@ class QtLoadingMixin:
         reload_action.setEnabled(bool(paths))
         location_action.setEnabled(any(os.path.exists(path) for path in paths))
         chosen = menu.exec(pane.table_list_widget.mapToGlobal(position))
-        if chosen is remove_action:
+        if chosen is slice_action:
+            self.open_netcdf_slice_dialog()
+        elif chosen is remove_action:
             self.remove_selected_sources(pane)
         elif chosen is reload_action:
             self.reload_selected_sources(pane)

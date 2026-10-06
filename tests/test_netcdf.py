@@ -232,6 +232,32 @@ class TestNetCDFFile(unittest.TestCase):
         self.assertEqual(tables[0].source_metadata['slice_tables_total'], 9)
         self.assertTrue(tables[0].source_metadata['slice_tables_truncated'])
 
+    def test_interactive_slice_creates_directly_plottable_curves(self):
+        netcdf = NetCDFFile(self.path)
+        frame = netcdf.slice_to_dataframe(
+            variable_name='cube',
+            x_dimension='time',
+            series_dimension='height',
+            fixed_indices={'component': 1},
+            x_range=(1, 2),
+        )
+
+        self.assertEqual(list(frame.columns), [
+            'time',
+            'cube [height=50]',
+            'cube [height=100]',
+        ])
+        np.testing.assert_array_equal(frame['time'], [1.0, 2.0])
+        np.testing.assert_array_equal(frame['cube [height=50]'], [5.0, 9.0])
+        np.testing.assert_array_equal(frame['cube [height=100]'], [7.0, 11.0])
+        self.assertTrue(frame.attrs['pydatview']['netcdf_interactive_slice'])
+
+    def test_coordinates_are_available_as_plottable_variables(self):
+        netcdf = NetCDFFile(self.path)
+        self.assertTrue(netcdf.plottable_variables()['time']['coordinate'])
+        frame = netcdf.slice_to_dataframe('time', 'time')
+        np.testing.assert_array_equal(frame['time'], [0.0, 1.0, 2.0])
+
 
 if __name__ == '__main__':
     unittest.main()
